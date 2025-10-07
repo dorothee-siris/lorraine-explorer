@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 # Your taxonomy helpers
-from taxonomy import (
+from lib.taxonomy import (
     build_taxonomy_lookups,
     canonical_field_order,
     get_field_color,
