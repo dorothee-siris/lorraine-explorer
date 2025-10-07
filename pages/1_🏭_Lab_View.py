@@ -225,14 +225,14 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
     max_pct = share_max
     # ceiling to nearest 5%
     max_tick = np.ceil(max_pct * 20) / 20.0  # 1/20 = 5%
-    xticks = np.arange(0.0, max(0.05, max_tick) + 1e-9, 0.05)
+    xticks = np.arange(0.0, max(0.1, max_tick) + 1e-9, 0.1)
     xticks = xticks[xticks <= share_max + 1e-9]  # keep within axis
     ax.set_xticks(xticks)
-    ax.set_xlabel("% of unit publications", fontsize=10)
+    ax.set_xlabel("% of unit publications", fontsize=11)
     ax.set_xlim(-left_pad_data, share_max)
 
     # Format x tick labels as percentages (0%, 5%, 10%, ...)
-    ax.set_xticklabels([f"{int(x*100)}%" for x in xticks], fontsize=9)
+    ax.set_xticklabels([f"{int(x*100)}%" for x in xticks], fontsize=10)
 
     # Clean spines
     for spine in ("top", "right", "left"):
