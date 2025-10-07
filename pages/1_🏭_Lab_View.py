@@ -3,53 +3,34 @@ from __future__ import annotations
 """
 Lab View — LUE Portfolio Explorer (self‑contained, new data feed)
 -----------------------------------------------------------------
-This page relies only on:
-  • data/pubs_final.parquet                 (publication level)
-  • data/ul_units_indicators.parquet        (lab-level indicators)
-  • data/ul_authors_indicators.parquet      (author-level indicators)
-  • lib/taxonomy.py                         (optional; for names/order/colors)
+Integrates `lib/columns.py` for schemas/parsing and adds partner lists +
+bar-chart standards (left gutter with counts, all labels visible, domain colors).
 
-It does NOT depend on other internal helpers. If taxonomy isn't available,
-charts still render with a reasonable fallback ordering.
-
-Important expected columns (case/spacing tolerant):
-  pubs_final.parquet
-    - OpenAlex ID | DOI | Title | Publication Year | Publication Type
-    - Authors | Authors ID | Authors ORCID
-    - Institution Types | Institution Countries | Institutions ROR
-    - FWCI_FR | FWCI_all | Citation Count
-    - Primary Topic | Primary Subfield ID | Primary Field ID | Primary Domain ID
-    - In_LUE | Labs_RORs | Is_international | Is_company
-
-  ul_units_indicators.parquet
-    - ROR | Unit Name | Pubs | % Pubs (uni level) | Pubs LUE | % Pubs LUE (lab level)
-    - % international | % industrial | Avg FWCI (France) | See in OpenAlex
-
-  ul_authors_indicators.parquet
-    - Author Name | Author ID | ORCID | Publications (unique) | Average FWCI_FR
-    - Is Lorraine (optional) | Lab(s)/labs columns (optional)
-
-Notes
------
-• Year filter controls plots and the dynamically generated OpenAlex links.
-• Field distributions & co-publications are computed from publication-level data.
-• Robust column normalization makes the app resilient to header variants.
+Relies on these files in /data:
+  • pubs_final.parquet
+  • ul_units_indicators.parquet
+  • ul_authors_indicators.parquet (optional)
+  • ul_partners_indicators.parquet (for partner totals)
+Optional: lib/taxonomy.py (for canonical ordering + colors)
 """
 
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import List, Optional
 
 import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Optional taxonomy import (safe if missing)
+# Optional taxonomy import (fallbacks if unavailable)
 try:
     from lib import taxonomy  # type: ignore
 except Exception:  # pragma: no cover
-    taxonomy = None  # graceful fallback
+    taxonomy = None
+
+# Columns mapping + parsers
+from lib import columns as colmap
 
 # ---------------------------------------------------------------------
 # Page config (must be before any output)
@@ -65,12 +46,10 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 @st.cache_data(show_spinner=False)
 def _read_parquet_safe(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
-    # unify all column names for tolerant matching (but keep originals too)
     df.columns = [c.strip() for c in df.columns]
     return df
 
 # --- pubs loader (normalize to snake_case) -----------------------------------
-
 PUBS_RENAME = {
     # id/meta
     "OpenAlex ID": "openalex_id",
@@ -109,13 +88,18 @@ def load_pubs(path: Optional[Path] = None) -> pd.DataFrame:
     path = path or (DATA_DIR / "pubs_final.parquet")
     df = _read_parquet_safe(path)
 
+    # Column sanity check (non-strict)
+    try:
+        _ = colmap.check_columns(df, "pubs_final")
+    except Exception:
+        pass
+
     # Case/variant tolerant renaming
     rename = {}
     for k, v in PUBS_RENAME.items():
         if k in df.columns:
             rename[k] = v
         else:
-            # accept relaxed keys (common variants)
             alt_key = k.replace("_", " ")
             if alt_key in df.columns:
                 rename[alt_key] = v
@@ -133,7 +117,6 @@ def load_pubs(path: Optional[Path] = None) -> pd.DataFrame:
     return df
 
 # --- labs/units loader --------------------------------------------------------
-
 UNITS_RENAME = {
     "ROR": "lab_ror",
     "OpenAlex ID": "lab_openalex_id",
@@ -153,23 +136,28 @@ UNITS_RENAME = {
 
 @st.cache_data(show_spinner=False)
 def load_labs(path: Optional[Path] = None) -> pd.DataFrame:
-    """Load lab/unit indicators and normalize column names."""
     path = path or (DATA_DIR / "ul_units_indicators.parquet")
-    df = _read_parquet_safe(path).rename(columns={k: v for k, v in UNITS_RENAME.items() if k in _read_parquet_safe(path).columns})
+    raw = _read_parquet_safe(path)
+
+    try:
+        _ = colmap.check_columns(raw, "ul_units_indicators")
+    except Exception:
+        pass
+
+    df = raw.rename(columns={k: v for k, v in UNITS_RENAME.items() if k in raw.columns})
 
     # Coerce numerics when present
     for c in ("pubs_19_23", "share_uni", "pubs_lue", "lue_pct_lab", "lue_pct_uni", "intl_pct", "company_pct", "avg_fwci_fr"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Add ROR link
+    # ROR link
     if "lab_ror" in df.columns:
         df["ror_url"] = df["lab_ror"].apply(lambda r: f"https://ror.org/{str(r).strip()}" if pd.notna(r) and str(r).strip() else None)
 
     return df
 
-# --- authors loader -----------------------------------------------------------
-
+# --- authors loader (optional enrichment) ------------------------------------
 AUTH_RENAME = {
     "Author Name": "author_name",
     "Normalized Name": "normalized_name",
@@ -183,14 +171,23 @@ AUTH_RENAME = {
 @st.cache_data(show_spinner=False)
 def load_authors(path: Optional[Path] = None) -> pd.DataFrame:
     path = path or (DATA_DIR / "ul_authors_indicators.parquet")
-    df = _read_parquet_safe(path)
-    df = df.rename(columns={k: v for k, v in AUTH_RENAME.items() if k in df.columns})
+    try:
+        raw = _read_parquet_safe(path)
+    except Exception:
+        return pd.DataFrame(columns=["author_id", "author_name", "orcid", "pubs_unique", "avg_fwci_fr", "is_lorraine"])  # optional
 
-    # explode potential multiple author IDs per row into tidy rows
+    try:
+        _ = colmap.check_columns(raw, "ul_authors_indicators")
+    except Exception:
+        pass
+
+    df = raw.rename(columns={k: v for k, v in AUTH_RENAME.items() if k in raw.columns})
+
+    # explode potential multiple author IDs per row
     if "author_id_raw" in df.columns:
         rows = []
         for _, r in df.iterrows():
-            ids = [x.strip() for x in str(r.get("author_id_raw", "")).split("|") if x.strip()]
+            ids = [x.strip() for x in colmap.split_pipe(r.get("author_id_raw", ""))]
             if not ids:
                 rows.append({**r, "author_id": None})
             else:
@@ -200,15 +197,44 @@ def load_authors(path: Optional[Path] = None) -> pd.DataFrame:
     else:
         df["author_id"] = None
 
-    # keep only relevant columns
     keep = [c for c in ("author_id", "author_name", "orcid", "pubs_unique", "avg_fwci_fr", "is_lorraine") if c in df.columns]
     return df[keep].drop_duplicates()
+
+# --- partners loader (totals per partner for % of partner output) ------------
+PARTNERS_RENAME = {
+    "Institution name": "partner_name",
+    "Institution ROR": "partner_ror",
+    "Copublications": "partner_copubs_ul",  # UL↔partner total
+    "Total works 2019-2023": "partner_total_works",
+}
+
+@st.cache_data(show_spinner=False)
+def load_partners(path: Optional[Path] = None) -> pd.DataFrame:
+    path = path or (DATA_DIR / "ul_partners_indicators.parquet")
+    try:
+        raw = _read_parquet_safe(path)
+    except Exception:
+        return pd.DataFrame(columns=["partner_name", "partner_ror", "partner_copubs_ul", "partner_total_works"])  # optional
+
+    try:
+        _ = colmap.check_columns(raw, "ul_partners_indicators")
+    except Exception:
+        pass
+
+    df = raw.rename(columns={k: v for k, v in PARTNERS_RENAME.items() if k in raw.columns})
+    # normalize name key
+    if "partner_name" in df.columns:
+        df["partner_key"] = df["partner_name"].astype(str).str.strip().str.lower()
+    # numeric coercions
+    for c in ("partner_copubs_ul", "partner_total_works"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 # ---------------------------------------------------------------------
 # Minimal transforms used on-page
 # ---------------------------------------------------------------------
 LEAD_NUM = re.compile(r"^\s*\[\d+\]\s*")
-
 
 def clean_pipe_list(s: object) -> List[str]:
     if s is None or (isinstance(s, float) and np.isnan(s)):
@@ -231,8 +257,6 @@ def explode_labs(pubs: pd.DataFrame) -> pd.DataFrame:
 
 
 def openalex_works_url_for_lab(ror: str, year_min: int, year_max: int) -> str:
-    
-    # OA expects full dates
     return (
         "https://openalex.org/works?"
         f"filter=authorships.institutions.ror:{ror},"
@@ -240,7 +264,6 @@ def openalex_works_url_for_lab(ror: str, year_min: int, year_max: int) -> str:
         f"to_publication_date:{year_max}-12-31"
         "&sort=publication_year:desc"
     )
-
 
 # Field ID -> name using taxonomy if available
 
@@ -256,7 +279,6 @@ def field_name_for_id(field_id: object) -> str:
 def canonical_field_order() -> List[str]:
     if taxonomy is not None:
         return taxonomy.canonical_field_order()
-    # fallback from present data (sorted by name)
     return []
 
 
@@ -265,36 +287,111 @@ def color_for_field(field: str) -> str:
         return taxonomy.get_field_color(field)
     return "#7f7f7f"
 
+# ---------------------------------------------------------------------
+# Chart utilities following the stated standards
+# ---------------------------------------------------------------------
 
-# Bar chart used for field mixes (volume or percent)
+def _ensure_all_categories(df: pd.DataFrame, cats: List[str]) -> pd.DataFrame:
+    base = pd.DataFrame({"field_name": cats})
+    out = base.merge(df, on="field_name", how="left")
+    for c in ["metric", "count"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    return out
 
-def field_mix_bars(df: pd.DataFrame, *, value_col: str, percent: bool, enforce_order: Optional[List[str]] = None,
-                   width: int = 560, height: int = 340) -> alt.Chart:
-    data = df.copy()
-    data["value"] = pd.to_numeric(data[value_col], errors="coerce").fillna(0.0)
 
-    # ordering & colors
-    cats = enforce_order or list(data["field_name"].unique())
+def _dynamic_height(n_items: int) -> int:
+    # dynamic height per item to guarantee all labels are visible
+    # ~24px per item + padding
+    return int(24 * max(n_items, 1) + 16)
+
+
+def plot_simple_bar(df: pd.DataFrame, metric_col: str, title: str) -> alt.Chart:
+    """Simple horizontal bar with all labels visible and canonical ordering."""
+    data = df.rename(columns={metric_col: "metric"}).copy()
+    cats = canonical_field_order() or data["field_name"].tolist()
+    data = _ensure_all_categories(data, cats)
+
     color_range = [color_for_field(f) for f in cats]
+    h = _dynamic_height(len(cats))
 
-    y = alt.Y("field_name:N", sort=cats, title="Field")
-    x_title = "% of lab publications" if percent else "Publications"
-    x = alt.X("value:Q", title=x_title, scale=alt.Scale(domain=[0, 1]) if percent else alt.Undefined)
-
-    tooltip = [alt.Tooltip("field_name:N", title="Field"), alt.Tooltip("value:Q", title=x_title, format=".0%" if percent else ",")]
-
-    chart = (
+    bars = (
         alt.Chart(data)
         .mark_bar()
         .encode(
-            y=y,
-            x=x,
-            color=alt.Color("field_name:N", sort=cats, scale=alt.Scale(domain=cats, range=color_range), legend=None),
-            tooltip=tooltip,
+            y=alt.Y("field_name:N", sort=cats, axis=alt.Axis(title=None, labelLimit=1000)),
+            x=alt.X("metric:Q", title=title),
+            color=alt.Color("field_name:N", scale=alt.Scale(domain=cats, range=color_range), legend=None),
+            tooltip=[alt.Tooltip("field_name:N", title="Field"), alt.Tooltip("metric:Q", title=title, format=",")],
         )
-        .properties(width=width, height=height)
+        .properties(width=560, height=h)
     )
-    return chart
+    return bars
+
+
+def plot_bar_with_counts(df: pd.DataFrame, metric_col: str, count_col: str, title: str, *, percent: bool = False) -> alt.HConcatChart:
+    """Horizontal bar with 80px left gutter for counts, domain colors, full labels.
+    Counts are rendered between labels and bars. All categories shown (even zeros).
+    """
+    data = df.rename(columns={metric_col: "metric", count_col: "count"}).copy()
+    cats = canonical_field_order() or data["field_name"].tolist()
+    data = _ensure_all_categories(data, cats)
+
+    # format counts with thousands sep (space)
+    data["count_fmt"] = data["count"].apply(lambda x: (f"{int(x):,}" if pd.notna(x) else "0").replace(",", " "))
+
+    color_range = [color_for_field(f) for f in cats]
+    h = _dynamic_height(len(cats))
+
+    # Left label panel (field names) to guarantee full visibility
+    labels_panel = (
+        alt.Chart(data)
+        .mark_text(align="left")
+        .encode(
+            y=alt.Y("field_name:N", sort=cats, axis=None),
+            text=alt.Text("field_name:N"),
+        )
+        .properties(width=220, height=h)
+    )
+
+    # Count gutter (80px)
+    counts_panel = (
+        alt.Chart(data)
+        .mark_text(align="right", baseline="middle", dy=0)
+        .encode(
+            y=alt.Y("field_name:N", sort=cats, axis=None),
+            text=alt.Text("count_fmt:N"),
+            color=alt.value("#444"),
+            size=alt.value(9),
+        )
+        .properties(width=80, height=h)
+    )
+
+    # Bars panel
+    x_enc = alt.X(
+        "metric:Q",
+        title=title,
+        scale=alt.Scale(domain=[0, 1]) if percent else alt.Undefined,
+    )
+
+    bars_panel = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            y=alt.Y("field_name:N", sort=cats, axis=None),
+            x=x_enc,
+            color=alt.Color("field_name:N", scale=alt.Scale(domain=cats, range=color_range), legend=None),
+            tooltip=[
+                alt.Tooltip("field_name:N", title="Field"),
+                alt.Tooltip("count:Q", title="Publications", format=","),
+                alt.Tooltip("metric:Q", title=title, format=".1%" if percent else ","),
+            ],
+        )
+        .properties(width=560, height=h)
+    )
+
+    chart = labels_panel | counts_panel | bars_panel
+    return chart.resolve_scale(y="shared")
 
 # ---------------------------------------------------------------------
 # Load data
@@ -317,6 +414,8 @@ with st.spinner("Loading data…"):
     except Exception:
         authors_idx = pd.DataFrame(columns=["author_id", "author_name", "orcid", "pubs_unique", "avg_fwci_fr", "is_lorraine"])  # optional
 
+    partners_tot = load_partners()  # optional (for partner output %)
+
 # Derive default years from data
 YEARS = sorted([int(y) for y in pubs["year"].dropna().unique()]) if "year" in pubs else list(range(2019, 2024))
 if YEARS:
@@ -329,21 +428,14 @@ st.caption(f"Default period: {YEAR_START}–{YEAR_END}")
 # ---------------------------------------------------------------------
 # Topline metrics (from pubs)
 # ---------------------------------------------------------------------
-try:
-    n_labs = int(pd.Series(sum(bool(clean_pipe_list(x)) for x in pubs.get("labs_rors", []))).sum())  # just to trigger dtype; unused
-except Exception:
-    n_labs = None
-
-# unique labs present in labs file (more robust)
 lab_count = int(labs["lab_ror"].nunique()) if "lab_ror" in labs else 0
 
-p19_23 = pubs[(pubs["year"] >= YEAR_START) & (pubs["year"] <= YEAR_END)] if "year" in pubs else pubs.copy()
+p_base = pubs[(pubs["year"] >= YEAR_START) & (pubs["year"] <= YEAR_END)] if "year" in pubs else pubs.copy()
 
-total_pubs = int(p19_23["openalex_id"].nunique()) if "openalex_id" in p19_23 else len(p19_23)
-
+total_pubs = int(p_base["openalex_id"].nunique()) if "openalex_id" in p_base else len(p_base)
 with_lab = 0
-if "labs_rors" in p19_23:
-    with_lab = int(p19_23.loc[p19_23["labs_rors"].map(lambda s: len(clean_pipe_list(s)) > 0), "openalex_id"].nunique())
+if "labs_rors" in p_base:
+    with_lab = int(p_base.loc[p_base["labs_rors"].map(lambda s: len(clean_pipe_list(s)) > 0), "openalex_id"].nunique())
 
 coverage = (with_lab / total_pubs) if total_pubs else 0.0
 
@@ -356,25 +448,15 @@ k4.metric("% covered by labs", f"{coverage*100:.1f}%")
 st.divider()
 
 # ---------------------------------------------------------------------
-# Per‑lab overview (2019–2023 baseline from ul_units_indicators)
+# Per‑lab overview (baseline from ul_units_indicators)
 # ---------------------------------------------------------------------
 st.subheader("Per‑lab overview")
 
 summary = labs.copy()
 
-# Display-friendly % columns (ul_units_indicators already stores fractions 0–1)
+# Display-friendly % columns (ul_units_indicators stores fractions 0–1)
 if "share_uni" in summary:
     summary["share_pct_display"] = summary["share_uni"] * 100.0
-else:
-    # fallback: compute from pubs
-    lab_totals = (
-        explode_labs(pubs)
-        .merge(pubs[["openalex_id", "year"]], on="openalex_id", how="left")
-        .query("@YEAR_START <= year <= @YEAR_END")
-        .groupby("lab_ror")["openalex_id"].nunique()
-    )
-    overall = max(total_pubs, 1)
-    summary["share_pct_display"] = summary["lab_ror"].map(lambda r: (lab_totals.get(r, 0) / overall) * 100.0)
 
 for src, dst in (
     ("lue_pct_lab", "lue_pct_display"),
@@ -446,7 +528,7 @@ if {"lab_name", "lab_ror"}.issubset(summary.columns):
 st.divider()
 
 # ---------------------------------------------------------------------
-# Compare two labs (field mixes from pubs)
+# Compare two labs (field mixes from pubs) + Top partners lists
 # ---------------------------------------------------------------------
 st.subheader("Compare two labs")
 
@@ -492,33 +574,136 @@ if not right_df.empty:
     right_total = max(float(right_df["count"].sum()), 1.0)
     right_df["pct"] = right_df["count"] / right_total
 
-catalogue = canonical_field_order()
+# Helper: top partners builder -------------------------------------------------
+
+def _partners_for_lab(one_lab_row: pd.Series, kind: str) -> pd.DataFrame:
+    """Return table of top partners for a lab row.
+    kind ∈ {"FR", "INT"}
+    Columns: [Partner, Co-pubs (lab), % of UL co-pubs, % of partner output]
+    """
+    if one_lab_row is None:
+        return pd.DataFrame(columns=["Partner", "Co-pubs (lab)", "% of UL co-pubs", "% of partner output"])
+
+    if kind == "FR":
+        cols = [
+            "Top 10 FR partners (name)",
+            "Top 10 FR partners (copubs with lab)",
+            "Top 10 FR partners (% of UL copubs)",
+        ]
+    else:
+        cols = [
+            "Top 10 int partners (name)",
+            "Top 10 int partners (copubs with lab)",
+            "Top 10 int partners (% of UL copubs)",
+        ]
+    missing = [c for c in cols if c not in labs.columns]
+    if missing:
+        return pd.DataFrame(columns=["Partner", "Co-pubs (lab)", "% of UL co-pubs", "% of partner output"])
+
+    names = colmap.split_pipe(one_lab_row.get(cols[0], ""))
+    counts = [int(x) if str(x).strip().isdigit() else None for x in colmap.split_pipe(one_lab_row.get(cols[1], ""))]
+    shares = [float(x) if str(x).strip() else None for x in colmap.split_pipe(one_lab_row.get(cols[2], ""))]
+
+    rows = []
+    for name, cnt, share in zip(names, counts, shares):
+        if not name:
+            continue
+        # Compute % of partner output using ul_partners_indicators
+        pct_partner = None
+        if not partners_tot.empty and "partner_name" in partners_tot.columns:
+            key = str(name).strip().lower()
+            match = partners_tot.loc[partners_tot["partner_key"] == key]
+            if not match.empty:
+                tot_works = float(match.iloc[0].get("partner_total_works") or np.nan)
+                if tot_works and tot_works > 0 and cnt is not None:
+                    pct_partner = cnt / tot_works
+        # % of UL co-pubs — prefer provided share; else compute via partner totals with UL
+        pct_ul = share
+        if (pct_ul is None or pd.isna(pct_ul)) and not partners_tot.empty:
+            key = str(name).strip().lower()
+            match = partners_tot.loc[partners_tot["partner_key"] == key]
+            if not match.empty:
+                ul_tot = float(match.iloc[0].get("partner_copubs_ul") or np.nan)
+                if ul_tot and ul_tot > 0 and cnt is not None:
+                    pct_ul = cnt / ul_tot
+        rows.append({
+            "Partner": name,
+            "Co-pubs (lab)": cnt,
+            "% of UL co-pubs": (pct_ul * 100.0) if pct_ul is not None and not pd.isna(pct_ul) else None,
+            "% of partner output": (pct_partner * 100.0) if pct_partner is not None and not pd.isna(pct_partner) else None,
+        })
+
+    t = pd.DataFrame(rows)
+    if not t.empty:
+        t = t.sort_values(["Co-pubs (lab)"], ascending=False).head(10)
+    return t
 
 pL, pR = st.columns(2, gap="large")
-for side, title, df_lab in [(pL, left_label, left_df), (pR, right_label, right_df)]:
+for side, title, this_ror, df_lab in [
+    (pL, left_label, left_ror, left_df),
+    (pR, right_label, right_ror, right_df),
+]:
     with side:
         st.markdown(f"### {title}")
         if df_lab.empty:
             st.info("No publications for this lab in the selected period.")
             continue
 
+        # Charts
         st.markdown("**Field distribution (volume)**")
         st.altair_chart(
-            field_mix_bars(
-                df_lab.rename(columns={"count": "value"}), value_col="value", percent=False,
-                enforce_order=catalogue or None, width=560
+            plot_bar_with_counts(
+                df_lab.rename(columns={"count": "metric"}), metric_col="metric", count_col="metric",
+                title="Publications", percent=False
             ),
             use_container_width=True,
         )
 
         st.markdown("**Field distribution (% of lab works)**")
         st.altair_chart(
-            field_mix_bars(
-                df_lab.rename(columns={"pct": "value"}), value_col="value", percent=True,
-                enforce_order=catalogue or None, width=560
+            plot_bar_with_counts(
+                df_lab.rename(columns={"pct": "metric", "count": "count"}), metric_col="metric", count_col="count",
+                title="% of lab publications", percent=True
             ),
             use_container_width=True,
         )
+
+        # Top partners (FR + International)
+        one_row = labs.loc[labs.get("lab_ror").astype(str) == this_ror]
+        one_row = one_row.iloc[0] if not one_row.empty else None
+
+        fr_tbl = _partners_for_lab(one_row, "FR")
+        int_tbl = _partners_for_lab(one_row, "INT")
+
+        a, b = st.columns(2)
+        with a:
+            st.markdown("**Top partners — France**")
+            if fr_tbl.empty:
+                st.caption("(no French partners detected)")
+            else:
+                st.dataframe(
+                    fr_tbl,
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "Co-pubs (lab)": st.column_config.NumberColumn(format=","),
+                        "% of UL co-pubs": st.column_config.NumberColumn(format="%.1f %%"),
+                        "% of partner output": st.column_config.NumberColumn(format="%.2f %%"),
+                    },
+                )
+        with b:
+            st.markdown("**Top partners — International**")
+            if int_tbl.empty:
+                st.caption("(no international partners detected)")
+            else:
+                st.dataframe(
+                    int_tbl,
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "Co-pubs (lab)": st.column_config.NumberColumn(format=","),
+                        "% of UL co-pubs": st.column_config.NumberColumn(format="%.1f %%"),
+                        "% of partner output": st.column_config.NumberColumn(format="%.2f %%"),
+                    },
+                )
 
 # ---------------------------------------------------------------------
 # Collaboration between selected labs (from pubs)
@@ -604,7 +789,6 @@ else:
     for _, r in copubs[need].iterrows():
         names = clean_pipe_list(r["authors"]) or [""] * len(clean_pipe_list(r["authors_id"]))
         ids   = clean_pipe_list(r["authors_id"]) or [""] * len(names)
-        # pad to match lengths
         if len(names) < len(ids):
             names += [""] * (len(ids) - len(names))
         if len(ids) < len(names):
@@ -621,14 +805,13 @@ else:
           .sort_values("Publications", ascending=False)
     )
 
-    # enrich from author indicators
     g = authors_idx.rename(columns={
         "author_id": "author_id",
         "author_name": "Author",
         "pubs_unique": "Total publications",
         "avg_fwci_fr": "Avg. FWCI (overall)",
         "is_lorraine": "Is Lorraine",
-    }) if not authors_idx.empty else pd.DataFrame(columns=["author_id"])  # noqa: E501
+    }) if not authors_idx.empty else pd.DataFrame(columns=["author_id"])
 
     top_authors = top_counts.merge(g, on=["author_id", "Author"], how="left") if not g.empty else top_counts
     top_authors = top_authors.sort_values(["Publications", "Avg. FWCI (overall)"], ascending=[False, False]).head(25)
@@ -664,7 +847,6 @@ else:
     rename = {c: new for c, new in want if c in copubs.columns}
     copub_table = copubs[cols].rename(columns=rename).drop_duplicates()
 
-    # add readable names for field/domain if present via taxonomy
     if taxonomy is not None and {"Primary Field ID"}.issubset(copub_table.columns):
         copub_table["Primary Field Name"] = copub_table["Primary Field ID"].map(field_name_for_id)
 
