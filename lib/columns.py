@@ -17,16 +17,8 @@ Design goals
    year/type distributions, "By X:" rollups) for streamlit visuals.
 3) Gentle normalization helpers (snake_case + alias map) without forcing you
    to rename columns in persisted files.
-
-Usage (short)
->>> import pandas as pd
->>> from columns import SCHEMAS, check_columns, explode_key_value_column
->>> df = pd.read_parquet("data/pubs_final.parquet")
->>> check_columns(df, "pubs_final")             # sanity-check schema
->>> authors = explode_bracket_indexed_column(df, "Authors", out_col="author_name")
->>> by_field = explode_key_value_column(df_fields, "By field: count",
-...                                     key_name="field_id", value_name="count")
 """
+
 from __future__ import annotations
 import re
 from dataclasses import dataclass
