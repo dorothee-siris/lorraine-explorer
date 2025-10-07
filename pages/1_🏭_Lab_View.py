@@ -177,15 +177,16 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
         "color": "#7f7f7f", "color_lue": "#5a5a5a", "domain": "Other",
     })
 
+
     y = np.arange(len(df))
-    heights = 0.6  # bar thickness
+    heights = 0.8  # bar thickness
 
     fig_h = max(1.0, 0.3 * len(df) + 0.8)
     fig, ax = plt.subplots(figsize=(7.2, fig_h))
 
     # Left gutter for counts (fixed pixels translated to data coords)
     left_pad_px = 72 if show_counts_gutter else 0
-    offset_px   = 6
+    offset_px   = 6 
     ax.set_xlim(0, share_max)
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
@@ -215,7 +216,7 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
     # Axis cosmetics
     ax.set_title(title, fontsize=12, pad=6)
     ax.set_yticks(y)
-    ax.set_yticklabels(df["field_name"], fontsize=9)
+    ax.set_yticklabels(df["field_name"], fontsize=10)
     ax.invert_yaxis()
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
