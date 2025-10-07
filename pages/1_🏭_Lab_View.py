@@ -48,7 +48,6 @@ def load_units() -> pd.DataFrame:
         "pptop10%": "PPtop10%",
         "pptop1%": "PPtop1%",
         "year distribution (2019-2023)": "Year distribution (2019-2023)",
-        "type distribution (articles|chapters|books|reviews, 2019-2023)": "Type distribution (articles|chapters|books|reviews, 2019-2023)",
         "by field: counts": "By field: counts",
         "by field: lue counts": "By field: LUE counts",
         "by field: fwci_fr min": "By field: FWCI_FR min",
@@ -188,8 +187,8 @@ def build_fields_table(row: pd.Series, look: Dict) -> pd.DataFrame:
     df = df.sort_values("__ord").drop(columns="__ord").reset_index(drop=True)
     return df
 
-def build_fwci_table(row: pd.Series, look: Dict) -> pd.DataFrame:
-    """Return per field: min, q1, med, q3, max, color, domain; ordered canonically."""
+def build_fwci_table(row: pd.Series, look: Dict, counts_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Return per field: min, q1, med, q3, max, color, domain, count; ordered canonically."""
     blobs = {
         "min": row.get("By field: FWCI_FR min", ""),
         "q1" : row.get("By field: FWCI_FR Q1", ""),
@@ -198,7 +197,7 @@ def build_fwci_table(row: pd.Series, look: Dict) -> pd.DataFrame:
         "max": row.get("By field: FWCI_FR max", ""),
     }
     parts = {k: parse_field_value_blob(v, look) for k,v in blobs.items()}
-    # start from union of fields
+    # union fields
     fields = set()
     for dfp in parts.values():
         fields.update(dfp["field_name"].tolist())
@@ -207,7 +206,9 @@ def build_fwci_table(row: pd.Series, look: Dict) -> pd.DataFrame:
     base = pd.DataFrame({"field_name": ordered})
     for k,dfp in parts.items():
         base = base.merge(dfp.rename(columns={"value": k}), on="field_name", how="left")
-    base = base.fillna(np.nan)
+    if counts_df is not None:
+        base = base.merge(counts_df[["field_name","count"]], on="field_name", how="left")
+    base = base.fillna({"count": 0})
     base["domain"] = base["field_name"].apply(lambda n: domain_from_field(n, look))
     base["color"]  = base["field_name"].apply(get_field_color)
     return base
@@ -266,7 +267,7 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
 
-    # ticks every 5% (you used 10% in your snippet; set to 5% here)
+    # ticks every 5%
     max_tick = np.ceil(share_max * 20) / 20.0
     xticks = np.arange(0.0, max(0.05, max_tick) + 1e-9, 0.05)
     xticks = xticks[xticks <= share_max + 1e-9]
@@ -284,30 +285,48 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
 def plot_fwci_whiskers(df_fwci: pd.DataFrame,
                        all_fields_order: List[str],
                        xmax: float,
-                       title: str) -> plt.Figure:
-    """Draw min—Q1—Median—Q3—Max whiskers per field (horizontal)."""
+                       title: str,
+                       show_counts_gutter: bool = True) -> plt.Figure:
+    """Draw min—Q1—Median—Q3—Max whiskers per field (horizontal) with left count gutter."""
     base = pd.DataFrame({"field_name": all_fields_order})
-    df = base.merge(df_fwci, on="field_name", how="left")
-    df = df.fillna(np.nan)
+    df = base.merge(df_fwci, on="field_name", how="left").fillna(np.nan)
 
     y = np.arange(len(df))
     fig_h = max(1.0, 0.40 * len(df) + 0.8)
     fig, ax = plt.subplots(figsize=(7.2, fig_h))
 
+    # left gutter
+    left_pad_px, offset_px = (72, 6)
+    ax.set_xlim(0, xmax)
+    fig.canvas.draw()
+    bb = ax.get_window_extent(renderer=fig.canvas.get_renderer())
+    ax_width_px = bb.width if bb.width > 0 else 600
+    data_per_px = (xmax - 0.0) / ax_width_px if ax_width_px else 0.0001
+    left_pad_data = left_pad_px * data_per_px
+    offset_data   = offset_px * data_per_px
+    ax.set_xlim(-left_pad_data, xmax)
+
     # draw per row
     for i, r in df.iterrows():
-        if pd.isna(r["min"]) and pd.isna(r["q1"]) and pd.isna(r["med"]) and pd.isna(r["q3"]) and pd.isna(r["max"]):
-            continue
+        c = r.get("color", "#7f7f7f")
         # whiskers
-        if pd.notna(r["min"]) and pd.notna(r["max"]):
-            ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=r.get("color","#7f7f7f"), linewidth=1.2, zorder=2)
+        if pd.notna(r.get("min")) and pd.notna(r.get("max")):
+            ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
         # box (Q1-Q3)
-        if pd.notna(r["q1"]) and pd.notna(r["q3"]):
+        if pd.notna(r.get("q1")) and pd.notna(r.get("q3")) and r["q3"] >= r["q1"]:
             ax.barh(y[i], width=r["q3"]-r["q1"], left=r["q1"], height=0.5,
-                    color=r.get("color","#7f7f7f"), alpha=0.25, edgecolor="none", zorder=3)
+                    color=c, alpha=0.25, edgecolor="none", zorder=3)
         # median
-        if pd.notna(r["med"]):
-            ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=r.get("color","#7f7f7f"), linewidth=2.0, zorder=4)
+        if pd.notna(r.get("med")):
+            ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
+
+    # gutter counts (use per-field counts if present)
+    if show_counts_gutter:
+        counts = df.get("count")
+        if counts is not None:
+            for yi, cnt in enumerate(pd.Series(counts).fillna(0).astype(int).tolist()):
+                ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
+                        va="center", ha="left", fontsize=9, color="#444")
 
     # axes & cosmetics
     ax.set_title(title, fontsize=12, pad=6)
@@ -316,7 +335,7 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
     ax.invert_yaxis()
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
-    ax.set_xlim(0, xmax)
+    ax.set_xlim(-left_pad_data, xmax)
     ax.set_xlabel("FWCI (France)", fontsize=11)
 
     for spine in ("top","right","left"):
@@ -325,26 +344,17 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
     plt.tight_layout()
     return fig
 
-def plot_mini_stacked_bar(values: List[int], labels: List[str], title: str, colors: List[str] | None = None) -> plt.Figure:
-    """Single stacked vertical bar with segments = values."""
-    v = np.array(values, dtype=float)
-    total = v.sum() if v.sum() > 0 else 1.0
-    shares = v / total
-    if colors is None:
-        colors = ["#888"] * len(values)
-    fig, ax = plt.subplots(figsize=(2.2, 2.6))
-    bottom = 0.0
-    for i, s in enumerate(shares):
-        ax.bar(0, s, bottom=bottom, color=colors[i], edgecolor="white", linewidth=0.5)
-        bottom += s
+def plot_year_counts_bar(values: List[int], title: str) -> plt.Figure:
+    """Simple vertical bar chart of totals per year (not stacked)."""
+    years = [2019 + i for i in range(len(values))]
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    ax.bar(years, values, width=0.6, color="#8190FF", edgecolor="none", alpha=0.9)
     ax.set_title(title, fontsize=11, pad=4)
-    ax.set_xlim(-0.6, 0.6)
-    ax.set_ylim(0, 1)
-    ax.set_xticks([])
-    ax.set_yticks([0,0.5,1.0])
-    ax.set_yticklabels(["0%","50%","100%"], fontsize=8)
-    ax.grid(False)
-    for spine in ("top","right","left","bottom"):
+    ax.set_xticks(years)
+    ax.set_xticklabels([str(y) for y in years], fontsize=9)
+    ax.set_ylabel("Publications", fontsize=9)
+    ax.grid(axis="y", color="#eeeeee")
+    for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
     plt.tight_layout()
     return fig
@@ -352,7 +362,7 @@ def plot_mini_stacked_bar(values: List[int], labels: List[str], title: str, colo
 # ------------------------------ UI ------------------------------
 
 st.set_page_config(page_title="Lab view · Fields", layout="wide")
-st.title("🏭 Lab view — Field distribution")
+st.title("🏭 Lab view — Field distribution (per lab)")
 
 look = get_lookups()
 df_units = load_units()
@@ -364,95 +374,33 @@ if not lab_names:
     st.error("No units of Type = 'lab' found.")
     st.stop()
 
-csel1, csel2 = st.columns(2)
-with csel1:
+sel_a, sel_b = st.columns(2)
+with sel_a:
     unit1 = st.selectbox("Select unit A (lab)", lab_names, index=0, key="unit_a")
-with csel2:
+with sel_b:
     default_idx = 1 if len(lab_names) > 1 else 0
     unit2 = st.selectbox("Select unit B (lab)", lab_names, index=default_idx, key="unit_b")
 
 row1 = labs.loc[labs["Unit Name"] == unit1].iloc[0]
 row2 = labs.loc[labs["Unit Name"] == unit2].iloc[0]
 
-# ------------------------- KPIs + mini bars -------------------------
-
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Pubs (2019–2023)", f"{int(row1.get('Pubs',0)):,}".replace(",", " "), help=unit1)
-kpi2.metric("… incl. LUE", f"{int(row1.get('Pubs LUE',0)):,}".replace(",", " "))
-kpi3.metric("… incl. Top 10%", f"{int(row1.get('PPtop10%',0)):,}".replace(",", " "))
-kpi4.metric("… incl. Top 1%", f"{int(row1.get('PPtop1%',0)):,}".replace(",", " "))
-
-# small stacked bars
-yb = parse_pipe_number_list(row1.get("Year distribution (2019-2023)", ""))
-tb = parse_pipe_number_list(row1.get("Type distribution (articles|chapters|books|reviews, 2019-2023)", ""))
-
-mini1, mini2 = st.columns(2)
-with mini1:
-    years = [2019,2020,2021,2022,2023]
-    year_colors = ["#ddd", "#cfcfcf", "#bfbfbf", "#a9a9a9", "#8f8f8f"]
-    fig_y = plot_mini_stacked_bar(yb, [str(y) for y in years[:len(yb)]], "Year distribution", year_colors[:len(yb)])
-    st.pyplot(fig_y, use_container_width=False)
-with mini2:
-    types = ["Articles","Chapters","Books","Reviews"]
-    # map types to domain-like palette for visual consistency
-    type_colors = ["#8190FF","#FFCB3A","#0CA750","#F85C32"]
-    fig_t = plot_mini_stacked_bar(tb, types[:len(tb)], "Types", type_colors[:len(tb)])
-    st.pyplot(fig_t, use_container_width=False)
-
-st.markdown("---")
-
-# ------------------- Field bars (share % + LUE overlay) -------------------
-
+# Precompute field tables & shared scales/orders --------------------------------
 df_f1 = build_fields_table(row1, look)
 df_f2 = build_fields_table(row2, look)
 fields_union = union_ordered_fields(df_f1, df_f2)
 share_max = float(max(df_f1["share"].max() if not df_f1.empty else 0.0,
                       df_f2["share"].max() if not df_f2.empty else 0.0, 0.05))
 
-c1, c2 = st.columns(2)
-with c1:
-    fig1 = plot_unit_fields_barh(df_f1, fields_union, share_max, f"{unit1} — field distribution")
-    st.pyplot(fig1, use_container_width=True)
-with c2:
-    fig2 = plot_unit_fields_barh(df_f2, fields_union, share_max, f"{unit2} — field distribution")
-    st.pyplot(fig2, use_container_width=True)
-
-# --------------------------- FWCI whiskers ---------------------------
-
-df_w1 = build_fwci_table(row1, look)
-df_w2 = build_fwci_table(row2, look)
-fields_union_fwci = union_ordered_fields(df_w1.rename(columns={"field_name":"field_name"}),
-                                         df_w2.rename(columns={"field_name":"field_name"}))
-
-xmax_fwci = np.nanmax([
+df_w1 = build_fwci_table(row1, look, counts_df=df_f1)
+df_w2 = build_fwci_table(row2, look, counts_df=df_f2)
+fields_union_fwci = union_ordered_fields(df_w1, df_w2)
+xmax_fwci = float(np.nanmax([
     df_w1["max"].max() if "max" in df_w1.columns and not df_w1["max"].isna().all() else 0.0,
     df_w2["max"].max() if "max" in df_w2.columns and not df_w2["max"].isna().all() else 0.0,
     1.0
-])
+]))
 
-st.subheader("FWCI (France) by field")
-c3, c4 = st.columns(2)
-with c3:
-    figw1 = plot_fwci_whiskers(df_w1, fields_union_fwci, xmax_fwci, f"{unit1} — FWCI by field")
-    st.pyplot(figw1, use_container_width=True)
-with c4:
-    figw2 = plot_fwci_whiskers(df_w2, fields_union_fwci, xmax_fwci, f"{unit2} — FWCI by field")
-    st.pyplot(figw2, use_container_width=True)
-
-st.markdown("---")
-
-# ---------------------- Internal collaborations ----------------------
-
-st.subheader("Internal collaborations")
-
-# KPIs
-ck1, ck2, ck3, ck4 = st.columns(4)
-ck1.metric("Co-pubs with another lab", f"{int(row1.get('Collab pubs (other labs)',0)):,}".replace(",", " "))
-ck2.metric("% with another lab", f"{(row1.get('% collab w/ another internal lab') or 0):.1f}%")
-ck3.metric("Co-pubs with other structures", f"{int(row1.get('Collab pubs (other structures)',0)):,}".replace(",", " "))
-ck4.metric("% with other structures", f"{(row1.get('% collab w/ another internal structure') or 0):.1f}%")
-
-# Top 5 internal partners (labs + other structures by ROR)
+# -------------------------- render one lab panel --------------------------
 def parse_partner_ror_counts(blob: str) -> pd.DataFrame:
     if pd.isna(blob) or not str(blob).strip():
         return pd.DataFrame(columns=["ROR","count"])
@@ -468,43 +416,7 @@ def parse_partner_ror_counts(blob: str) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["ROR","count"])
     return df.groupby("ROR", as_index=False)["count"].sum().sort_values("count", ascending=False)
 
-partners_labs  = parse_partner_ror_counts(row1.get("Collab labs (by ROR)", ""))
-partners_other = parse_partner_ror_counts(row1.get("Collab other structures (by ROR)", ""))
-partners = pd.concat([partners_labs, partners_other], ignore_index=True)
-if not partners.empty:
-    partners = partners.groupby("ROR", as_index=False)["count"].sum().sort_values("count", ascending=False)
-
-    # Map ROR -> Unit Name when possible (using the same file)
-    ror2name = df_units.set_index("ROR")["Unit Name"].to_dict() if "ROR" in df_units.columns else {}
-    partners["Name"] = partners["ROR"].map(ror2name).fillna(partners["ROR"])
-    partners = partners[["Name","ROR","count"]].head(5)
-
-    st.markdown("**Top 5 internal partners**")
-    st.dataframe(
-        partners,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Name": st.column_config.TextColumn("Name"),
-            "ROR":  st.column_config.TextColumn("ROR", help="Registry identifier"),
-            "count": st.column_config.NumberColumn("Co-pubs"),
-        }
-    )
-else:
-    st.info("No internal partner data.")
-
-st.markdown("---")
-
-# --------------------- International partners ---------------------
-
-st.subheader("International partners")
-st.metric("% international publications", f"{(row1.get('% international') or 0):.1f}%")
-
 def parse_parallel_lists(names_blob: str, *more_blobs: str) -> pd.DataFrame:
-    """
-    Parse pipe-separated parallel columns into a DataFrame.
-    e.g., "A | B" + "type1 | type2" + "FR | DE" + "3 | 5" + "0.2 | 0.8"
-    """
     def split_clean(s: str) -> List[str]:
         if pd.isna(s) or not str(s).strip():
             return []
@@ -512,7 +424,7 @@ def parse_parallel_lists(names_blob: str, *more_blobs: str) -> pd.DataFrame:
     cols = [split_clean(names_blob)]
     for b in more_blobs:
         cols.append(split_clean(b))
-    n = max(len(c) for c in cols) if cols else 0
+    n = max((len(c) for c in cols), default=0)
     cols = [c + [""]*(n-len(c)) for c in cols]
     df = pd.DataFrame({"name": cols[0]})
     if len(cols) > 1: df["type"] = cols[1]
@@ -521,60 +433,116 @@ def parse_parallel_lists(names_blob: str, *more_blobs: str) -> pd.DataFrame:
     if len(cols) > 4: df["% UL copubs"] = [ _to_float_safe(x) for x in cols[4] ]
     return df
 
-intl_df = parse_parallel_lists(
-    row1.get("Top 10 int partners (name)", ""),
-    row1.get("Top 10 int partners (type)", ""),
-    row1.get("Top 10 int partners (country)", ""),
-    row1.get("Top 10 int partners (copubs with lab)", ""),
-    row1.get("Top 10 int partners (% of UL copubs)", ""),
-)
-if not intl_df.empty:
-    st.dataframe(
-        intl_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "name": st.column_config.TextColumn("Partner"),
-            "country": st.column_config.TextColumn("Country"),
-            "copubs": st.column_config.NumberColumn("Co-pubs"),
-            "type": st.column_config.TextColumn("Type", help="Hidden by default"),
-            "% UL copubs": st.column_config.NumberColumn("% of UL co-pubs", help="Hidden by default", format="%.2f"),
-        },
-        column_order=["name","country","copubs","type","% UL copubs"],
-        hide_columns=["type","% UL copubs"],   # hidden by default (you can toggle in UI)
-    )
-else:
-    st.info("No international partner data.")
+def render_lab_panel(container, row: pd.Series, unit_name: str,
+                     df_fields: pd.DataFrame, df_fwci: pd.DataFrame):
+    with container:
+        st.markdown(f"### {unit_name}")
 
-st.markdown("---")
+        # --- KPIs ---
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Pubs (2019–2023)", f"{int(row.get('Pubs',0)):,}".replace(",", " "))
+        k2.metric("… incl. LUE", f"{int(row.get('Pubs LUE',0)):,}".replace(",", " "))
+        k3.metric("… incl. Top 10%", f"{int(row.get('PPtop10%',0)):,}".replace(",", " "))
+        k4.metric("… incl. Top 1%", f"{int(row.get('PPtop1%',0)):,}".replace(",", " "))
 
-# ------------------------ French partners ------------------------
+        # --- Yearly totals bar ---
+        ycounts = parse_pipe_number_list(row.get("Year distribution (2019-2023)", ""))
+        if ycounts:
+            ycol = st.columns(1)[0]
+            with ycol:
+                fig_years = plot_year_counts_bar(ycounts, "Yearly publications (totals)")
+                st.pyplot(fig_years, use_container_width=True)
+        else:
+            st.info("No yearly distribution data.")
 
-st.subheader("French partners")
+        # --- Thematic distribution ---
+        fig_fields = plot_unit_fields_barh(df_fields, fields_union, share_max,
+                                           "Field distribution (% of unit) — total & LUE")
+        st.pyplot(fig_fields, use_container_width=True)
 
-fr_df = parse_parallel_lists(
-    row1.get("Top 10 FR partners (name)", ""),
-    row1.get("Top 10 FR partners (type)", ""),
-    "",  # no country column for FR list
-    row1.get("Top 10 FR partners (copubs with lab)", ""),
-    row1.get("Top 10 FR partners (% of UL copubs)", ""),
-)
-if not fr_df.empty:
-    # ensure columns exist
-    if "country" not in fr_df.columns: fr_df["country"] = "France"
-    st.dataframe(
-        fr_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "name": st.column_config.TextColumn("Partner"),
-            "country": st.column_config.TextColumn("Country"),
-            "copubs": st.column_config.NumberColumn("Co-pubs"),
-            "% UL copubs": st.column_config.NumberColumn("% of UL co-pubs", format="%.2f"),
-            "type": st.column_config.TextColumn("Type", help="Hidden by default"),
-        },
-        column_order=["name","country","copubs","% UL copubs","type"],
-        hide_columns=["type"],   # hidden by default
-    )
-else:
-    st.info("No French partner data.")
+        # --- FWCI whiskers (with counts gutter) ---
+        fig_fwci = plot_fwci_whiskers(df_fwci, fields_union_fwci, xmax_fwci,
+                                      "FWCI (France) by field", show_counts_gutter=True)
+        st.pyplot(fig_fwci, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- Internal collaborations ---
+        st.markdown("#### Internal collaborations")
+
+        ck1, ck2, ck3, ck4 = st.columns(4)
+        ck1.metric("Co-pubs with another lab", f"{int(row.get('Collab pubs (other labs)',0)):,}".replace(",", " "))
+        ck2.metric("% with another lab", f"{(row.get('% collab w/ another internal lab') or 0):.1f}%")
+        ck3.metric("Co-pubs with other structures", f"{int(row.get('Collab pubs (other structures)',0)):,}".replace(",", " "))
+        ck4.metric("% with other structures", f"{(row.get('% collab w/ another internal structure') or 0):.1f}%")
+
+        partners_labs  = parse_partner_ror_counts(row.get("Collab labs (by ROR)", ""))
+        partners_other = parse_partner_ror_counts(row.get("Collab other structures (by ROR)", ""))
+        partners = pd.concat([partners_labs, partners_other], ignore_index=True)
+        if not partners.empty:
+            partners = partners.groupby("ROR", as_index=False)["count"].sum().sort_values("count", ascending=False)
+            ror2name = df_units.set_index("ROR")["Unit Name"].to_dict() if "ROR" in df_units.columns else {}
+            partners["Name"] = partners["ROR"].map(ror2name).fillna(partners["ROR"])
+            top5 = partners[["Name","count"]].head(5)   # Hide ROR column
+            st.dataframe(top5.rename(columns={"count":"Co-pubs"}), use_container_width=True, hide_index=True)
+        else:
+            st.info("No internal partner data.")
+
+        st.markdown("---")
+
+        # --- International partners ---
+        st.markdown("#### International partners")
+        st.metric("% international publications", f"{(row.get('% international') or 0):.1f}%")
+
+        intl_df = parse_parallel_lists(
+            row.get("Top 10 int partners (name)", ""),
+            row.get("Top 10 int partners (type)", ""),
+            row.get("Top 10 int partners (country)", ""),
+            row.get("Top 10 int partners (copubs with lab)", ""),
+            row.get("Top 10 int partners (% of UL copubs)", ""),
+        )
+        if not intl_df.empty:
+            # Default visible columns
+            visible = ["name","country","copubs"]
+            st.dataframe(intl_df[visible].rename(columns={
+                "name":"Partner","country":"Country","copubs":"Co-pubs"
+            }), use_container_width=True, hide_index=True)
+
+            with st.expander("Show additional columns"):
+                extra = ["type","% UL copubs"]
+                extra_df = intl_df[["name"] + extra].rename(columns={
+                    "name":"Partner", "type":"Type", "% UL copubs":"% of UL co-pubs"
+                })
+                st.dataframe(extra_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No international partner data.")
+
+        st.markdown("---")
+
+        # --- French partners ---
+        st.markdown("#### French partners")
+        fr_df = parse_parallel_lists(
+            row.get("Top 10 FR partners (name)", ""),
+            row.get("Top 10 FR partners (type)", ""),
+            "",  # no country column
+            row.get("Top 10 FR partners (copubs with lab)", ""),
+            row.get("Top 10 FR partners (% of UL copubs)", ""),
+        )
+        if not fr_df.empty:
+            fr_df["country"] = "France"
+            visible = ["name","country","copubs","% UL copubs"]
+            st.dataframe(fr_df[visible].rename(columns={
+                "name":"Partner","country":"Country","copubs":"Co-pubs","% UL copubs":"% of UL co-pubs"
+            }), use_container_width=True, hide_index=True)
+
+            with st.expander("Show additional columns"):
+                extra_df = fr_df[["name","type"]].rename(columns={"name":"Partner","type":"Type"})
+                st.dataframe(extra_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No French partner data.")
+
+# -------------------------- Two panels side by side --------------------------
+colA, colB = st.columns(2)
+
+render_lab_panel(colA, row1, unit1, df_f1, df_w1)
+render_lab_panel(colB, row2, unit2, df_f2, df_w2)
