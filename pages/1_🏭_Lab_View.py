@@ -178,7 +178,7 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
     })
 
     y = np.arange(len(df))
-    heights = 0.8  # bar thickness
+    heights = 0.6  # bar thickness
 
     fig_h = max(1.0, 0.42 * len(df) + 0.8)
     fig, ax = plt.subplots(figsize=(7.2, fig_h))
@@ -203,7 +203,7 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
 
         # LUE overlay
         if row["lue_share"] > 0:
-            ax.barh(y[i], width=row["lue_share"], left=0.0, height=heights*0.6,
+            ax.barh(y[i], width=row["lue_share"], left=0.0, height=heights*0.8,
                     edgecolor="none", color=row["color_lue"], alpha=1.0, zorder=3)
 
     # Counts gutter text
