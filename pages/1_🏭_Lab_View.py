@@ -366,7 +366,6 @@ def plot_year_counts_bar(values: List[int], title: str, ymax: int | None = None)
     ax.grid(axis="y", color="#eeeeee")
     for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
-    plt.tight_layout()
     return fig
 
 # ------------------------------ UI ------------------------------
