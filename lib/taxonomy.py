@@ -1,3 +1,4 @@
+# taxonomy.py
 from __future__ import annotations
 
 from functools import lru_cache
@@ -220,6 +221,35 @@ def get_subfield_color(subfield_name_or_id: str) -> str:
             return get_field_color(f)
     return _DOMAIN_COLORS["Other"]
 
+
+@lru_cache(maxsize=None)
+def get_domain_for_field(field_name_or_id: str) -> str:
+    """
+    Return the parent domain name for a given field (name or numeric id).
+    If unknown, returns 'Other'.
+    """
+    look = build_taxonomy_lookups()
+    field = str(field_name_or_id)
+    if field.isdigit():
+        field = look["id2name"].get(field, field)
+
+    for dom, fields in look["fields_by_domain"].items():
+        if field in fields:
+            return dom
+    return "Other"
+
+
+@lru_cache(maxsize=None)
+def field_id_to_name(field_id_or_name: str) -> str:
+    """
+    Normalize a field token (either id or name) to a field name string.
+    If not resolvable, returns the original token.
+    """
+    tok = str(field_id_or_name).strip()
+    look = build_taxonomy_lookups()
+    if tok.isdigit():
+        return look["id2name"].get(tok, tok)
+    return tok
 
 # --------------------------- conveniences --------------------------
 
