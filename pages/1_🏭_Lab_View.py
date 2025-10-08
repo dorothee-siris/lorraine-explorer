@@ -814,17 +814,48 @@ def parse_authors(row: pd.Series) -> pd.DataFrame:
 # --- NEW: subfield wordcloud ---
 def render_subfield_wordcloud(df_sub: pd.DataFrame | None, title: str):
     """
-    df_sub: DataFrame[name, count, color] or None
+    df_sub: DataFrame with columns ['name','count','color'] or None.
+    Renders a wordcloud colored by each subfield's domain color.
     """
-    if df_sub is None or df_sub.empty:
+    if df_sub is None or (isinstance(df_sub, pd.DataFrame) and df_sub.empty):
         st.info("No subfield data for wordcloud.")
         return
+
     try:
         from wordcloud import WordCloud
     except Exception:
         st.info("Install `wordcloud` to see the subfield wordcloud.")
         return
 
+    # Normalize & validate
+    df = df_sub.copy()
+    for col in ("name", "count"):
+        if col not in df.columns:
+            st.info("Subfield data missing required columns.")
+            return
+
+    df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0).astype(int)
+    df = df[df["count"] > 0]
+    if df.empty:
+        st.info("No subfield counts > 0 to display.")
+        return
+
+    # Build frequency and color maps
+    freqs = dict(zip(df["name"].astype(str), df["count"].astype(int)))
+    if "color" in df.columns:
+        name2color = dict(zip(df["name"].astype(str), df["color"].astype(str)))
+    else:
+        name2color = {}
+
+    def wc_color_func(word, *args, **kwargs):
+        hexcol = name2color.get(word, "#7f7f7f")
+        h = hexcol.lstrip("#")
+        try:
+            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        except Exception:
+            return (127, 127, 127)
+
+    # Render
     wc = WordCloud(width=900, height=350, background_color="white", prefer_horizontal=0.95)
     wc.generate_from_frequencies(freqs)
     wc.recolor(color_func=wc_color_func)
