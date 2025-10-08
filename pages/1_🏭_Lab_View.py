@@ -211,28 +211,33 @@ def darken_hex(hex_color: str, factor: float = 0.65) -> str:
 # --- NEW: parse "By subfield: counts"  -> subfield_id,count,name,color
 def parse_subfield_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
     """
-    '2505 (7) | 1211 (3) | ...' -> DataFrame[subfield_id(str), count(int), name, color]
+    '2505 (7) | 1211 (3) | ...' -> DataFrame[subfield_id,str; count,int; name,str; color,str]
     """
+    # Always return a DF
+    empty = pd.DataFrame(columns=["subfield_id", "count", "name", "color"])
+
     if pd.isna(blob) or not str(blob).strip():
-        return pd.DataFrame(columns=["subfield_id","count","name","color"])
+        return empty
 
     parts = [p.strip() for p in str(blob).split("|")]
     rows = []
     for p in parts:
-        m = re.match(r"^\s*([^\s()]+)\s*\(\s*([0-9]+)\s*\)\s*$", p)
+        m = re.match(r"^\s*([^\s()]+)\s*\((\d+)\)\s*$", p)
         if not m:
             continue
         sid = str(m.group(1)).strip()
         cnt = _to_int_safe(m.group(2))
         rows.append((sid, cnt))
 
-    df = pd.DataFrame(rows, columns=["subfield_id","count"])
-    if df.empty:
-        return pd.DataFrame(columns=["subfield_id","count","name","color"])
+    if not rows:
+        return empty
 
-    id2name = look["id2name"]
+    df = pd.DataFrame(rows, columns=["subfield_id", "count"])
+    id2name = look.get("id2name", {})
     df["name"]  = df["subfield_id"].map(lambda x: id2name.get(str(x), str(x)))
     df["color"] = df["subfield_id"].map(lambda x: get_subfield_color(str(x)))
+    df = df.groupby(["subfield_id", "name", "color"], as_index=False)["count"].sum()
+    return df
 
 
 # --- NEW: parse "By domain and by year: counts" -> (year, domain_name, count)
@@ -551,6 +556,11 @@ st.title("🏭 Lab view — Field distribution (per lab)")
 
 look = get_lookups()
 df_units = load_units()
+# TEMP sanity check
+_sub_cols = [c for c in df_units.columns if "subfield" in c.lower()]
+_domyr_cols = [c for c in df_units.columns if "domain" in c.lower() and "year" in c.lower()]
+st.write("Columns containing 'subfield':", _sub_cols)
+st.write("Columns containing 'domain' & 'year':", _domyr_cols)
 df_pubs  = load_pubs()  # may be None
 
 # ----------------------------- topline before comparison -----------------------------
@@ -802,30 +812,17 @@ def parse_authors(row: pd.Series) -> pd.DataFrame:
     return df
 
 # --- NEW: subfield wordcloud ---
-def render_subfield_wordcloud(df_sub: pd.DataFrame, title: str):
+def render_subfield_wordcloud(df_sub: pd.DataFrame | None, title: str):
     """
-    df_sub: DataFrame[name, count, color]
+    df_sub: DataFrame[name, count, color] or None
     """
-    if df_sub.empty:
+    if df_sub is None or df_sub.empty:
         st.info("No subfield data for wordcloud.")
         return
     try:
         from wordcloud import WordCloud
     except Exception:
         st.info("Install `wordcloud` to see the subfield wordcloud.")
-        return
-
-    # frequencies and a color map by word
-    freqs = {r["name"]: int(r["count"]) for _, r in df_sub.iterrows() if int(r["count"]) > 0}
-    name2color = {r["name"]: r["color"] for _, r in df_sub.iterrows()}
-
-    def wc_color_func(word, *args, **kwargs):
-        hexcol = name2color.get(word, "#7f7f7f")
-        h = hexcol.lstrip("#")
-        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-    if not freqs:
-        st.info("No subfield counts > 0 to display.")
         return
 
     wc = WordCloud(width=900, height=350, background_color="white", prefer_horizontal=0.95)
@@ -859,7 +856,10 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         k4.metric("… incl. Top 1%", f"{int(row.get('PPtop1%',0)):,}".replace(",", " "))
 
         # --- NEW: Subfield wordcloud (all publications of the lab) ---
-        df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
+        if "By subfield: counts" in row.index:
+            df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
+        else:
+            df_sub = None
         render_subfield_wordcloud(df_sub, "Subfields in unit publications (size = frequency)")
 
         # --- NEW: Yearly stacked by domain (from precomputed blob) ---
