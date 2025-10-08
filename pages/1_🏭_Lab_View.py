@@ -897,14 +897,9 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         )
         st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
 
-        # --- NEW: Subfield wordcloud (all publications of the lab) ---
-        if "By subfield: counts" in row.index:
-            df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
-        else:
-            df_sub = None
-        render_subfield_wordcloud(df_sub, "Subfields in unit publications (size = frequency)")
-
         # --- NEW: Yearly stacked by domain (from precomputed blob) ---
+        st.markdown("#### Distribution per domain and per year")
+
         if not df_year_domain.empty:
             fig_years = plot_yearly_stacked_by_domain(
                 df_year_domain, look, "Yearly publications by domain", ymax=ymax_year
@@ -913,7 +908,18 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         else:
             st.info("No domain-by-year distribution data.")
 
+        # --- NEW: Subfield wordcloud (all publications of the lab) ---
+        st.markdown("#### Subfields Word Cloud")
+
+        if "By subfield: counts" in row.index:
+            df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
+        else:
+            df_sub = None
+        render_subfield_wordcloud(df_sub, "Subfields in unit publications (size = frequency)")
+
         # --- Thematic distribution (fields) ---
+        st.markdown("#### Distribution per field (% of lab totals)")
+
         fig_fields = plot_unit_fields_barh(
             df_fields, fields_union, share_max,
             "Field distribution (% of unit) — total & LUE"
@@ -921,6 +927,7 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         st.pyplot(fig_fields, use_container_width=True)
 
         # --- FWCI whiskers (with counts gutter) ---
+        st.markdown("#### Distribution of FWCI values per field")
         fig_fwci = plot_fwci_whiskers(
             df_fwci, fields_union_fwci, xmax_fwci,
             "FWCI (France) by field", show_counts_gutter=True
