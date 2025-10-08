@@ -28,6 +28,7 @@ from lib.taxonomy import (
     get_field_color,
     get_subfield_color,
     build_taxonomy_lookups,
+    get_domain_color,
 )
 
 # ---------------------------- paths & cache ----------------------------
@@ -773,7 +774,7 @@ st.subheader(f"Co-publications between **{unit1}** and **{unit2}** (2019–2023)
 if df_pubs is None:
     st.info("Inter-lab collaboration details unavailable because pubs_final.parquet could not be loaded.")
 else:
-    # --- columns (exact schema of pubs_final.parquet) ---
+    # --- exact column names from pubs_final.parquet ---
     col_year        = "Publication Year"
     col_openalex    = "OpenAlex ID"
     col_fwci        = "FWCI_FR"
@@ -783,8 +784,8 @@ else:
     col_top1        = "Is_PPtop1%_(field)"
     col_subfield_id = "Primary Subfield ID"
     col_topic       = "Primary Topic"
+    col_domain_id   = "Primary Domain ID"
 
-    # Minimal sanity check
     missing_core = [c for c in [col_year, col_labs_rors] if c not in df_pubs.columns]
     if missing_core:
         st.warning(f"Cannot compute co-publication stats — missing columns in pubs_final.parquet: {missing_core}")
@@ -812,105 +813,171 @@ else:
         copubs = pubs.loc[mask].copy()
 
         # KPIs
-        n_copubs = int(len(copubs))
-        if col_is_lue:
-            lue_count   = int(copubs[col_is_lue].fillna(False).astype(bool).sum()) if col_is_lue in copubs.columns else 0
-            lue_pct = (lue_count / max(n_copubs, 1)) * 100.0
-        else:
-            lue_count, lue_pct = 0, 0.0
-
+        from math import isnan
+        n_copubs   = int(len(copubs))
+        lue_count  = int(copubs[col_is_lue].fillna(False).astype(bool).sum()) if col_is_lue in copubs.columns else 0
         top10_count = int(copubs[col_top10].fillna(False).astype(bool).sum())  if col_top10  in copubs.columns else 0
-        top1_count  = int(copubs[col_top1].fillna(False).astype(bool).sum())   if col_top1   in copubs.columns else 0
-        avg_fwci = float(pd.to_numeric(copubs[col_fwci], errors="coerce").mean()) if col_fwci else float("nan")
+        top1_count  = int(copubs[col_top1 ].fillna(False).astype(bool).sum())  if col_top1   in copubs.columns else 0
+        avg_fwci   = float(pd.to_numeric(copubs[col_fwci], errors="coerce").mean()) if col_fwci in copubs.columns else float("nan")
 
-        mk1, mk2, mk3, mk4, mk5 = st.columns(5)
+        mk1, mk2, mk3, mk4 = st.columns(4)
         mk1.metric("Co-publications", f"{n_copubs:,}".replace(",", " "))
         mk2.metric("… incl. LUE (count)", f"{lue_count:,}".replace(",", " "))
-        mk3.metric("… incl. LUE (%)", f"{lue_pct:.1f}%")
-        mk4.metric("… Top 10% (count)", f"{top10_count:,}".replace(",", " "))
-        mk5.metric("… Top 1% (count)", f"{top1_count:,}".replace(",", " "))
-
+        mk3.metric("… Top 10% (count)", f"{top10_count:,}".replace(",", " "))
+        mk4.metric("… Top 1% (count)", f"{top1_count:,}".replace(",", " "))
         if not np.isnan(avg_fwci):
             st.metric("Average FWCI (FR) of co-pubs", f"{avg_fwci:.3f}")
 
-        # Yearly distribution bar
-        if col_year:
-            ydist = copubs.groupby(col_year)[col_year].count().rename("count").reset_index()
-            years = [y for y in range(YEAR_START, YEAR_END+1)]
-            yvals = [int(ydist.loc[ydist[col_year]==y, "count"].sum()) for y in years]
-            fig_y = plot_year_counts_bar(yvals, "Yearly co-publications", ymax=max(yvals) if yvals else None)
-            st.pyplot(fig_y, use_container_width=True)
+        # --- Domain legend (place it right after topline metrics) ---
+        legend_items = "".join(
+            f'<div class="legend-item"><span class="legend-swatch" style="background:{DOMAIN_COLORS[d]};"></span>{d}</div>'
+            for d in build_taxonomy_lookups()["domain_order"]
+        )
+        st.markdown(
+            """
+            <style>
+            .legend-row { display:flex; gap:12px; align-items:center; margin: 6px 0 10px 2px;}
+            .legend-item { display:flex; align-items:center; gap:6px; font-size: 0.95rem; color:#333;}
+            .legend-swatch { display:inline-block; width:14px; height:14px; border-radius:3px; }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
 
-        # Subfield counts horizontal bars
-        if col_subfield_id:
+        # ===== Yearly distribution stacked by domain =====
+        # Map domain IDs -> names (via taxonomy)
+        looks = build_taxonomy_lookups()
+        id2name = looks["id2name"]
+        if col_domain_id in copubs.columns:
+            copubs["_domain_name"] = copubs[col_domain_id].apply(lambda x: id2name.get(str(int(x)) if pd.notna(x) else "", "Other"))
+        else:
+            copubs["_domain_name"] = "Other"
+
+        # aggregate counts
+        yr_dom = (copubs
+                  .dropna(subset=[col_year])
+                  .groupby([col_year, "_domain_name"])
+                  .size()
+                  .reset_index(name="count"))
+
+        # full grid for missing combos
+        all_years = list(range(YEAR_START, YEAR_END + 1))
+        dom_order = looks["domain_order"]
+        grid = pd.MultiIndex.from_product([all_years, dom_order], names=[col_year, "_domain_name"]).to_frame(index=False)
+        yr_dom = grid.merge(yr_dom, on=[col_year, "_domain_name"], how="left").fillna({"count": 0})
+        yr_dom_pivot = yr_dom.pivot(index=col_year, columns="_domain_name", values="count").fillna(0).reindex(all_years, fill_value=0)
+
+        # stacked bar (matplotlib)
+        fig_y, ax_y = plt.subplots(figsize=(7.6, 3.2))  # fixed size; avoid container-scaling
+        bottoms = np.zeros(len(yr_dom_pivot))
+        for dom in dom_order:
+            vals = yr_dom_pivot.get(dom, pd.Series([0]*len(all_years), index=yr_dom_pivot.index)).values
+            ax_y.bar(yr_dom_pivot.index, vals, bottom=bottoms, color=get_domain_color(dom), edgecolor="none", alpha=0.95, label=dom)
+            bottoms += vals
+
+        ax_y.set_title("Yearly co-publications by domain", fontsize=12, pad=6)
+        ax_y.set_xlabel("Year", fontsize=11)
+        ax_y.set_ylabel("Co-publications (count)", fontsize=11)
+        ax_y.set_xticks(all_years)
+        ax_y.set_xticklabels([str(y) for y in all_years], fontsize=10)
+        ax_y.tick_params(axis="y", labelsize=10)
+        ax_y.grid(axis="y", color="#eeeeee")
+        for spine in ("top","right"):
+            ax_y.spines[spine].set_visible(False)
+
+        # center on page without stretching
+        c1, c2, c3 = st.columns([1, 2.2, 1])
+        with c2:
+            st.pyplot(fig_y, use_container_width=False)
+
+        # ===== Subfield counts (horizontal bars; color by domain via taxonomy) =====
+        from matplotlib.ticker import MaxNLocator
+
+        if col_subfield_id in copubs.columns:
             sub_counts = (copubs
-                          .assign(_sub= pd.to_numeric(copubs[col_subfield_id], errors="coerce").astype("Int64"))
+                          .assign(_sub=pd.to_numeric(copubs[col_subfield_id], errors="coerce").astype("Int64"))
                           .dropna(subset=["_sub"]))
-            sub_counts = sub_counts.groupby("_sub").size().reset_index(name="count").sort_values("count", ascending=False)
-            # map to names & colors
-            lookups = build_taxonomy_lookups()
-            id2name = lookups.get("id2name", {})
+            sub_counts = (sub_counts.groupby("_sub")
+                          .size()
+                          .reset_index(name="count")
+                          .sort_values("count", ascending=False))
+
+            # name & color
             sub_counts["name"] = sub_counts["_sub"].astype(str).map(id2name).fillna(sub_counts["_sub"].astype(str))
             sub_counts["color"] = sub_counts["_sub"].astype(str).apply(get_subfield_color)
 
-            # plot
             y = np.arange(len(sub_counts))
-            fig_h = max(1.0, 0.35 * len(sub_counts) + 0.8)
-            fig, ax = plt.subplots(figsize=(7.6, fig_h))
-            ax.barh(y, sub_counts["count"], color=sub_counts["color"], edgecolor="none", alpha=0.95)
-            ax.set_yticks(y)
-            ax.set_yticklabels(sub_counts["name"], fontsize=10)
-            ax.invert_yaxis()
-            ax.grid(axis="x", color="#eeeeee")
-            ax.set_xlabel("Co-publications (count)", fontsize=11)
-            ax.set_title("Co-publications by primary subfield", fontsize=12, pad=6)
+            fig_s, ax_s = plt.subplots(figsize=(7.6, max(2.0, 0.35 * len(sub_counts) + 0.6)))
+            ax_s.barh(y, sub_counts["count"].astype(int).values, color=sub_counts["color"].tolist(), edgecolor="none", alpha=0.95)
+            ax_s.set_yticks(y)
+            ax_s.set_yticklabels(sub_counts["name"], fontsize=10)
+            ax_s.invert_yaxis()
+            ax_s.grid(axis="x", color="#eeeeee")
+            ax_s.set_xlabel("Co-publications (count)", fontsize=11)
+            ax_s.set_title("Co-publications by primary subfield", fontsize=12, pad=6)
+            ax_s.xaxis.set_major_locator(MaxNLocator(integer=True))
             for spine in ("top","right","left"):
-                ax.spines[spine].set_visible(False)
-            plt.tight_layout()
+                ax_s.spines[spine].set_visible(False)
 
-            # legend row (HTML, not generated by matplotlib)
-            legend_items = "".join(
-                f'<div class="legend-item"><span class="legend-swatch" style="background:{DOMAIN_COLORS[d]};"></span>{d}</div>'
-                for d in ["Health Sciences","Life Sciences","Physical Sciences","Social Sciences"]
-            )
-            st.markdown(
-                """
-                <style>
-                .legend-row { display:flex; gap:12px; align-items:center; margin: 0 0 6px 4px;}
-                .legend-item { display:flex; align-items:center; gap:6px; font-size: 0.9rem; color:#333;}
-                .legend-swatch { display:inline-block; width:14px; height:14px; border-radius:3px; }
-                </style>
-                """,
-                unsafe_allow_html=True
-            )
-            st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
-            st.pyplot(fig, use_container_width=True)
+            c1, c2, c3 = st.columns([1, 2.2, 1])
+            with c2:
+                st.pyplot(fig_s, use_container_width=False)
 
-        # Wordcloud of topics
-        if col_topic:
-            topics = copubs[col_topic].dropna().astype(str).tolist()
+        # ===== Word cloud of topics (show names, colored by domain via taxonomy) =====
+        if col_topic in copubs.columns:
+            topics_raw = copubs[col_topic].dropna().astype(str).tolist()
+            # Map IDs -> names; keep only non-empty
             try:
+                from collections import Counter
                 from wordcloud import WordCloud
-                text = " ".join([t.replace("|"," ").replace(";"," ") for t in topics])
-                if text.strip():
-                    wc = WordCloud(width=900, height=400, background_color="white").generate(text)
-                    fig_wc, ax_wc = plt.subplots(figsize=(8, 3.6))
+
+                def topic_id_to_name_safe(tok: str) -> str:
+                    # will be provided by taxonomy (see patch below)
+                    try:
+                        from lib.taxonomy import topic_id_to_name
+                        return topic_id_to_name(tok)
+                    except Exception:
+                        return looks["id2name"].get(tok, tok)
+
+                topic_names = [topic_id_to_name_safe(t) for t in topics_raw]
+                topic_names = [t for t in topic_names if t and t.lower() != "nan"]
+                if topic_names:
+                    freqs = Counter(topic_names)
+
+                    # color by domain of the topic
+                    def wc_color_func(word, *args, **kwargs):
+                        try:
+                            from lib.taxonomy import get_topic_color
+                            hexcol = get_topic_color(word)
+                        except Exception:
+                            hexcol = DOMAIN_COLORS.get("Other", "#7f7f7f")
+                        h = hexcol.lstrip("#")
+                        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                        return (r, g, b)
+
+                    wc = WordCloud(width=900, height=400, background_color="white", prefer_horizontal=0.95)
+                    wc.generate_from_frequencies(freqs)
+                    wc.recolor(color_func=wc_color_func)
+
+                    fig_wc, ax_wc = plt.subplots(figsize=(8.0, 3.6))
                     ax_wc.imshow(wc, interpolation="bilinear")
                     ax_wc.axis("off")
-                    ax_wc.set_title("Topics word cloud", fontsize=12, pad=6)
-                    st.pyplot(fig_wc, use_container_width=True)
+                    ax_wc.set_title("Topics (size = frequency in co-pubs)", fontsize=12, pad=6)
+
+                    c1, c2, c3 = st.columns([1, 2.2, 1])
+                    with c2:
+                        st.pyplot(fig_wc, use_container_width=False)
                 else:
                     st.info("No topics to display for wordcloud.")
-            except Exception:
+            except Exception as e:
                 st.info("Install `wordcloud` to see the topics cloud (e.g., `pip install wordcloud`).")
 
-        # Download CSV of co-pubs
-        if col_openalex is None:
-            col_openalex = "row_index"
-            copubs["row_index"] = np.arange(len(copubs))
+        # ===== Download CSV of co-pubs =====
         st.download_button(
             "Download co-publications (CSV)",
             data=copubs.to_csv(index=False, encoding="utf-8-sig"),
             file_name=f"copubs_{unit1}_AND_{unit2}_{YEAR_START}-{YEAR_END}.csv",
             mime="text/csv",
         )
+

@@ -69,10 +69,14 @@ def _load_topics(topics_path: Optional[str | Path] = None) -> pd.DataFrame:
             f"Found columns: {list(df.columns)}"
         )
 
-    # coerce ids to int where possible
-    for c in ("domain_id", "field_id", "subfield_id", "topic_id"):
+    # coerce ids to int where possible (except topic_id which may be alphanumeric like 'T13054')
+    for c in ("domain_id", "field_id", "subfield_id"):  # removed "topic_id" here
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+
+    # keep topic_id as string, if present
+    if "topic_id" in df.columns:
+        df["topic_id"] = df["topic_id"].astype(str).str.strip()
 
     # strip whitespace on names
     for c in ("domain_name", "field_name", "subfield_name", "topic_name"):
@@ -156,8 +160,12 @@ def build_taxonomy_lookups(topics_path: Optional[str | Path] = None) -> Dict:
             _id = r[id_col]
             _nm = r[name_col]
             if pd.notna(_id) and pd.notna(_nm):
-                id2name[str(int(_id))] = str(_nm)
-                name2id[str(_nm)] = str(int(_id))
+                if id_col == "topic_id":
+                    id_key = str(_id).strip()       # keep alphanumeric topic ids as-is
+                else:
+                    id_key = str(int(_id))           # numeric ids as ints -> string
+                id2name[id_key] = str(_nm)
+                name2id[str(_nm)] = id_key
 
     return {
         "domain_order": domain_order,
@@ -250,6 +258,37 @@ def field_id_to_name(field_id_or_name: str) -> str:
     if tok.isdigit():
         return look["id2name"].get(tok, tok)
     return tok
+
+@lru_cache(maxsize=None)
+def topic_id_to_name(topic_id_or_name: str) -> str:
+    """
+    Normalize a topic token (id like 'T13054' or name) to a topic name string.
+    If not resolvable, returns the original token.
+    """
+    tok = str(topic_id_or_name).strip()
+    look = build_taxonomy_lookups()
+    # if already a name
+    if tok in look["name2id"]:
+        return tok
+    # try id -> name
+    return look["id2name"].get(tok, tok)
+
+@lru_cache(maxsize=None)
+def get_topic_color(topic_name_or_id: str) -> str:
+    """
+    Topic inherits its parent domain color.
+    """
+    tok = str(topic_name_or_id).strip()
+    tdf = _load_topics()
+    # Resolve by id first
+    m = tdf.loc[tdf["topic_id"].astype(str) == tok]
+    if m.empty:
+        # try by name
+        m = tdf.loc[tdf.get("topic_name", "").astype(str) == tok]
+    if not m.empty:
+        dom = m["domain_name"].iloc[0]
+        return get_domain_color(dom)
+    return _DOMAIN_COLORS["Other"]
 
 # --------------------------- conveniences --------------------------
 
