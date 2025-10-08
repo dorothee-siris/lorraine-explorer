@@ -206,6 +206,62 @@ def darken_hex(hex_color: str, factor: float = 0.65) -> str:
     r, g, b = max(0,r), max(0,g), max(0,b)
     return f"#{r:02x}{g:02x}{b:02x}"
 
+# --- NEW: parse "By subfield: counts"  -> subfield_id,count,name,color
+def parse_subfield_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
+    """
+    '2505 (7) | 1211 (3) | ...' -> DataFrame[subfield_id(str), count(int), name, color]
+    """
+    if pd.isna(blob) or not str(blob).strip():
+        return pd.DataFrame(columns=["subfield_id","count","name","color"])
+    parts = [p.strip() for p in str(blob).split("|")]
+    rows = []
+    for p in parts:
+        m = re.match(r"^\s*([^\s()]+)\s*\((\d+)\)\s*$", p)
+        if not m:
+            continue
+        sid = str(m.group(1)).strip()
+        cnt = _to_int_safe(m.group(2))
+        rows.append((sid, cnt))
+    df = pd.DataFrame(rows, columns=["subfield_id","count"])
+    if df.empty:
+        return pd.DataFrame(columns=["subfield_id","count","name","color"])
+    id2name = look["id2name"]
+    df["name"]  = df["subfield_id"].map(lambda x: id2name.get(str(x), str(x)))
+    df["color"] = df["subfield_id"].map(lambda x: get_subfield_color(str(x)))
+    df = df.groupby(["subfield_id","name","color"], as_index=False)["count"].sum()
+    return df
+
+
+# --- NEW: parse "By domain and by year: counts" -> (year, domain_name, count)
+def parse_domain_year_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
+    """
+    '2019 (1 : 7 | 2 : 0 | 3 : 0 | 4 : 2) ; 2020 (1 : ...)' ->
+    DataFrame[year(int), domain(str), count(int)]
+    """
+    if pd.isna(blob) or not str(blob).strip():
+        return pd.DataFrame(columns=["year","domain","count"])
+    rows = []
+    for part in str(blob).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^\s*(\d{4})\s*\((.*?)\)\s*$", part)
+        if not m:
+            continue
+        year = int(m.group(1))
+        inside = [x.strip() for x in m.group(2).split("|")]
+        for pair in inside:
+            dm = re.match(r"^\s*(\d+)\s*:\s*([0-9]+)\s*$", pair)
+            if not dm:
+                continue
+            dom_id = dm.group(1).strip()
+            cnt    = _to_int_safe(dm.group(2))
+            dom_name = look["id2name"].get(dom_id, dom_id)  # 1..4 -> domain name
+            rows.append((year, dom_name, cnt))
+    df = pd.DataFrame(rows, columns=["year","domain","count"])
+    return df
+
+
 # --------------------------- shaping tables ---------------------------
 
 def build_fields_table(row: pd.Series, look: Dict) -> pd.DataFrame:
@@ -409,6 +465,54 @@ def plot_year_counts_bar(values: List[int], title: str, ymax: int | None = None)
     plt.tight_layout()
     return fig
 
+from matplotlib.ticker import MaxNLocator
+
+# --- NEW: yearly stacked bar by domain ---
+def plot_yearly_stacked_by_domain(df_yr_dom: pd.DataFrame,
+                                  look: Dict,
+                                  title: str,
+                                  ymax: int | None = None) -> plt.Figure:
+    """
+    df_yr_dom: DataFrame[year, domain, count]
+    """
+    if df_yr_dom.empty:
+        fig, ax = plt.subplots(figsize=(7.6, 2.8))
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    years = sorted(df_yr_dom["year"].unique().tolist())
+    dom_order = look["domain_order"][:]  # keep canonical order
+    pivot = (df_yr_dom.pivot_table(index="year", columns="domain", values="count",
+                                   aggfunc="sum", fill_value=0)
+                       .reindex(index=years, fill_value=0))
+
+    fig, ax = plt.subplots(figsize=(7.6, 3.2))
+    bottoms = np.zeros(len(years), dtype=int)
+    for dom in dom_order:
+        if dom not in pivot.columns:
+            continue
+        vals = pivot[dom].astype(int).values
+        ax.bar(years, vals, bottom=bottoms,
+               color=get_domain_color(dom), edgecolor="none", linewidth=0,
+               antialiased=False, label=dom)
+        bottoms += vals
+
+    ax.set_title(title, fontsize=12, pad=6)
+    ax.set_xlabel("Year", fontsize=11)
+    ax.set_ylabel("Publications (count)", fontsize=11)
+    ax.set_xticks(years)
+    ax.set_xticklabels([str(y) for y in years], fontsize=10)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    if ymax is not None and ymax > 0:
+        ax.set_ylim(0, ymax)
+    ax.grid(False)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+    return fig
+
+
 # ------------------------------ UI ------------------------------
 
 st.set_page_config(page_title="Lab view · Fields", layout="wide")
@@ -581,10 +685,17 @@ xmax_fwci = float(np.nanmax([
     1.0
 ]))
 
-# Yearly y-axis shared max
-ycounts1 = parse_pipe_number_list(row1.get("Year distribution (2019-2023)", ""))
-ycounts2 = parse_pipe_number_list(row2.get("Year distribution (2019-2023)", ""))
-ymax_year = max(max(ycounts1 or [0]), max(ycounts2 or [0]))
+# Domain-by-year blobs (per lab) + shared y max for stacked charts
+df_yd1 = parse_domain_year_counts_blob(row1.get("By domain and by year: counts", ""), look)
+df_yd2 = parse_domain_year_counts_blob(row2.get("By domain and by year: counts", ""), look)
+
+def _max_year_total(df):
+    if df.empty:
+        return 0
+    return int(df.groupby("year")["count"].sum().max() or 0)
+
+ymax_year = max(_max_year_total(df_yd1), _max_year_total(df_yd2), 1)
+
 
 # -------------------------- helpers for table padding --------------------------
 
@@ -659,11 +770,55 @@ def parse_authors(row: pd.Series) -> pd.DataFrame:
     })
     return df
 
+# --- NEW: subfield wordcloud ---
+def render_subfield_wordcloud(df_sub: pd.DataFrame, title: str):
+    """
+    df_sub: DataFrame[name, count, color]
+    """
+    if df_sub.empty:
+        st.info("No subfield data for wordcloud.")
+        return
+    try:
+        from wordcloud import WordCloud
+    except Exception:
+        st.info("Install `wordcloud` to see the subfield wordcloud.")
+        return
+
+    # frequencies and a color map by word
+    freqs = {r["name"]: int(r["count"]) for _, r in df_sub.iterrows() if int(r["count"]) > 0}
+    name2color = {r["name"]: r["color"] for _, r in df_sub.iterrows()}
+
+    def wc_color_func(word, *args, **kwargs):
+        hexcol = name2color.get(word, "#7f7f7f")
+        h = hexcol.lstrip("#")
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    if not freqs:
+        st.info("No subfield counts > 0 to display.")
+        return
+
+    wc = WordCloud(width=900, height=350, background_color="white", prefer_horizontal=0.95)
+    wc.generate_from_frequencies(freqs)
+    wc.recolor(color_func=wc_color_func)
+
+    fig_wc, ax_wc = plt.subplots(figsize=(8.0, 3.2))
+    ax_wc.imshow(wc, interpolation="bilinear")
+    ax_wc.axis("off")
+    ax_wc.set_title(title, fontsize=12, pad=6)
+
+    c1, c2, c3 = st.columns([1, 2.0, 1])
+    with c2:
+        st.pyplot(fig_wc, use_container_width=False)
+
+
+# -------------------------- render one lab panel --------------------------
+
 # -------------------------- render one lab panel --------------------------
 
 def render_lab_panel(container, row: pd.Series, unit_name: str,
                      df_fields: pd.DataFrame, df_fwci: pd.DataFrame,
-                     yearly_values: List[int], yearly_ymax: int):
+                     df_year_domain: pd.DataFrame, ymax_year: int):
+
     with container:
         st.markdown(f"### {unit_name}")
 
@@ -674,21 +829,34 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         k3.metric("… incl. Top 10%", f"{int(row.get('PPtop10%',0)):,}".replace(",", " "))
         k4.metric("… incl. Top 1%", f"{int(row.get('PPtop1%',0)):,}".replace(",", " "))
 
-        # --- Yearly totals bar (shared y-scale across labs) ---
-        if yearly_values:
-            fig_years = plot_year_counts_bar(yearly_values, "Yearly publications (totals)", ymax=yearly_ymax)
-            st.pyplot(fig_years, use_container_width=True)
-        else:
-            st.info("No yearly distribution data.")
+        # --- NEW: Subfield wordcloud (all publications of the lab) ---
+        df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
+        render_subfield_wordcloud(df_sub, "Subfields in unit publications (size = frequency)")
 
-        # --- Thematic distribution ---
-        fig_fields = plot_unit_fields_barh(df_fields, fields_union, share_max,
-                                           "Field distribution (% of unit) — total & LUE")
+        # --- NEW: Yearly stacked by domain (from precomputed blob) ---
+        if not df_year_domain.empty:
+            fig_years = plot_yearly_stacked_by_domain(
+                df_year_domain, look, "Yearly publications by domain", ymax=ymax_year
+            )
+            # center and avoid over-scaling
+            c1, c2, c3 = st.columns([1, 2.0, 1])
+            with c2:
+                st.pyplot(fig_years, use_container_width=False)
+        else:
+            st.info("No domain-by-year distribution data.")
+
+        # --- Thematic distribution (fields) ---
+        fig_fields = plot_unit_fields_barh(
+            df_fields, fields_union, share_max,
+            "Field distribution (% of unit) — total & LUE"
+        )
         st.pyplot(fig_fields, use_container_width=True)
 
         # --- FWCI whiskers (with counts gutter) ---
-        fig_fwci = plot_fwci_whiskers(df_fwci, fields_union_fwci, xmax_fwci,
-                                      "FWCI (France) by field", show_counts_gutter=True)
+        fig_fwci = plot_fwci_whiskers(
+            df_fwci, fields_union_fwci, xmax_fwci,
+            "FWCI (France) by field", show_counts_gutter=True
+        )
         st.pyplot(fig_fwci, use_container_width=True)
 
         st.markdown("---")
@@ -722,7 +890,17 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
 
         # enforce exactly 5 rows (pad with blanks)
         top5 = pad_table_rows(top5, 5, numeric_cols=["Co-pubs"])
-        st.dataframe(top5, use_container_width=True, hide_index=True)
+        st.dataframe(
+            top5,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Partner"),
+                "Department": st.column_config.TextColumn("Department"),
+                "Type": st.column_config.TextColumn("Type"),
+                "Co-pubs": st.column_config.NumberColumn("Co-pubs"),
+            },
+        )
 
         st.markdown("---")
 
@@ -740,7 +918,9 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         if intl_df.empty:
             intl_df = pd.DataFrame(columns=["name","country","copubs","type","% UL copubs"])
 
-        intl_df["% of UL copubs with this partner"] = pd.to_numeric(intl_df.get("% UL copubs"), errors="coerce") * 100.0
+        intl_df["% of UL copubs with this partner"] = pd.to_numeric(
+            intl_df.get("% UL copubs"), errors="coerce"
+        ) * 100.0
         intl_df = intl_df.rename(columns={
             "name":"Partner","country":"Country","copubs":"Co-pubs","type":"Type"
         })[["Partner","Country","Co-pubs","% of UL copubs with this partner","Type"]]
@@ -775,7 +955,9 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         if fr_df.empty:
             fr_df = pd.DataFrame(columns=["name","type","copubs","% UL copubs"])
 
-        fr_df["% of UL copubs with this partner"] = pd.to_numeric(fr_df.get("% UL copubs"), errors="coerce") * 100.0
+        fr_df["% of UL copubs with this partner"] = pd.to_numeric(
+            fr_df.get("% UL copubs"), errors="coerce"
+        ) * 100.0
         fr_df = fr_df.rename(columns={"name":"Partner","type":"Type","copubs":"Co-pubs"})[
             ["Partner","Co-pubs","% of UL copubs with this partner","Type"]
         ]
@@ -795,20 +977,31 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
             },
         )
 
-
         st.markdown("---")
 
         # --- Top 10 Authors ---
         st.markdown("#### Top 10 Authors")
-        authors = parse_authors(row)
+        authors = parse_authors(row)  # expects your helper to return columns: Author, Pubs, Avg FWCI (FR), Is UL?, Other UL lab(s)
         authors = pad_table_rows(authors, 10, numeric_cols=["Pubs","Avg FWCI (FR)"])
-        st.dataframe(authors, use_container_width=True, hide_index=True)
+        st.dataframe(
+            authors,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Author": st.column_config.TextColumn("Author"),
+                "Pubs": st.column_config.NumberColumn("Pubs", format="%.0f"),
+                "Avg FWCI (FR)": st.column_config.NumberColumn("Avg FWCI (FR)", format="%.3f"),
+                "Is UL?": st.column_config.TextColumn("Is UL?"),
+                "Other UL lab(s)": st.column_config.TextColumn("Other UL lab(s)"),
+            },
+        )
+
 
 # -------------------------- Two panels side by side --------------------------
 colA, colB = st.columns(2)
 
-render_lab_panel(colA, row1, unit1, df_f1, df_w1, ycounts1, ymax_year)
-render_lab_panel(colB, row2, unit2, df_f2, df_w2, ycounts2, ymax_year)
+render_lab_panel(colA, row1, unit1, df_f1, df_w1, df_yd1, ymax_year)
+render_lab_panel(colB, row2, unit2, df_f2, df_w2, df_yd2, ymax_year)
 
 st.divider()
 
