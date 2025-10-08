@@ -855,14 +855,12 @@ def render_subfield_wordcloud(df_sub: pd.DataFrame | None, title: str):
     wc.generate_from_frequencies(freqs)
     wc.recolor(color_func=wc_color_func)
 
-    fig_wc, ax_wc = plt.subplots(figsize=(8.0, 3.2))
+    fig_wc, ax_wc = plt.subplots(figsize=(6.5, 2.6))  # a bit narrower for column
     ax_wc.imshow(wc, interpolation="bilinear")
     ax_wc.axis("off")
     ax_wc.set_title(title, fontsize=12, pad=6)
 
-    c1, c2, c3 = st.columns([1, 2.0, 1])
-    with c2:
-        st.pyplot(fig_wc, use_container_width=False)
+    st.pyplot(fig_wc, use_container_width=True)
 
 
 # -------------------------- render one lab panel --------------------------
@@ -911,10 +909,7 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
             fig_years = plot_yearly_stacked_by_domain(
                 df_year_domain, look, "Yearly publications by domain", ymax=ymax_year
             )
-            # center and avoid over-scaling
-            c1, c2, c3 = st.columns([1, 2.0, 1])
-            with c2:
-                st.pyplot(fig_years, use_container_width=False)
+            st.pyplot(fig_years, use_container_width=True)
         else:
             st.info("No domain-by-year distribution data.")
 
