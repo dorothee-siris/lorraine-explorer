@@ -556,11 +556,6 @@ st.title("🏭 Lab view — Field distribution (per lab)")
 
 look = get_lookups()
 df_units = load_units()
-# TEMP sanity check
-_sub_cols = [c for c in df_units.columns if "subfield" in c.lower()]
-_domyr_cols = [c for c in df_units.columns if "domain" in c.lower() and "year" in c.lower()]
-st.write("Columns containing 'subfield':", _sub_cols)
-st.write("Columns containing 'domain' & 'year':", _domyr_cols)
 df_pubs  = load_pubs()  # may be None
 
 # ----------------------------- topline before comparison -----------------------------
@@ -885,6 +880,24 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         k2.metric("… incl. LUE", f"{int(row.get('Pubs LUE',0)):,}".replace(",", " "))
         k3.metric("… incl. Top 10%", f"{int(row.get('PPtop10%',0)):,}".replace(",", " "))
         k4.metric("… incl. Top 1%", f"{int(row.get('PPtop1%',0)):,}".replace(",", " "))
+
+        # ----- Legend (right after KPIs)
+        looks = build_taxonomy_lookups()
+        legend_items = "".join(
+            f'<div class="legend-item"><span class="legend-swatch" style="background:{get_domain_color(d)};"></span>{d}</div>'
+            for d in looks["domain_order"]
+        )
+        st.markdown(
+            """
+            <style>
+            .legend-row { display:flex; gap:12px; align-items:center; margin: 6px 0 10px 2px; }
+            .legend-item { display:flex; align-items:center; gap:6px; font-size: 0.95rem; color:#333; }
+            .legend-swatch { display:inline-block; width:14px; height:14px; border-radius:3px; }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
 
         # --- NEW: Subfield wordcloud (all publications of the lab) ---
         if "By subfield: counts" in row.index:
