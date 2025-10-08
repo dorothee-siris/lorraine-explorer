@@ -73,6 +73,8 @@ def load_units() -> pd.DataFrame:
         "by field: fwci_fr q2": "By field: FWCI_FR Q2",
         "by field: fwci_fr q3": "By field: FWCI_FR Q3",
         "by field: fwci_fr max": "By field: FWCI_FR max",
+        "by domain and by year: counts": "By domain and by year: counts",
+        "by subfield: counts": "By subfield: counts",
         "collab pubs (other labs)": "Collab pubs (other labs)",
         "% collab w/ another internal lab": "% collab w/ another internal lab",
         "collab pubs (other structures)": "Collab pubs (other structures)",
@@ -213,35 +215,40 @@ def parse_subfield_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
     """
     if pd.isna(blob) or not str(blob).strip():
         return pd.DataFrame(columns=["subfield_id","count","name","color"])
+
     parts = [p.strip() for p in str(blob).split("|")]
     rows = []
     for p in parts:
-        m = re.match(r"^\s*([^\s()]+)\s*\((\d+)\)\s*$", p)
+        m = re.match(r"^\s*([^\s()]+)\s*\(\s*([0-9]+)\s*\)\s*$", p)
         if not m:
             continue
         sid = str(m.group(1)).strip()
         cnt = _to_int_safe(m.group(2))
         rows.append((sid, cnt))
+
     df = pd.DataFrame(rows, columns=["subfield_id","count"])
     if df.empty:
         return pd.DataFrame(columns=["subfield_id","count","name","color"])
+
     id2name = look["id2name"]
     df["name"]  = df["subfield_id"].map(lambda x: id2name.get(str(x), str(x)))
     df["color"] = df["subfield_id"].map(lambda x: get_subfield_color(str(x)))
-    df = df.groupby(["subfield_id","name","color"], as_index=False)["count"].sum()
-    return df
 
 
 # --- NEW: parse "By domain and by year: counts" -> (year, domain_name, count)
 def parse_domain_year_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
     """
-    '2019 (1 : 7 | 2 : 0 | 3 : 0 | 4 : 2) ; 2020 (1 : ...)' ->
-    DataFrame[year(int), domain(str), count(int)]
+    Robustly parse blobs like:
+      '2019 (1 : 7 | 2 : 0 | 3 : 0 | 4 : 2) ; 2020 (1 : 3 | 2 : 1 | ...)'
+    Also tolerates noisy pairs like '3 : domain id : 7' by extracting ints and
+    taking FIRST int as domain id, LAST int as count.
     """
     if pd.isna(blob) or not str(blob).strip():
         return pd.DataFrame(columns=["year","domain","count"])
+
     rows = []
-    for part in str(blob).split(";"):
+    # split by semicolons into per-year chunks
+    for part in re.split(r"[;]+", str(blob)):
         part = part.strip()
         if not part:
             continue
@@ -249,16 +256,40 @@ def parse_domain_year_counts_blob(blob: str, look: Dict) -> pd.DataFrame:
         if not m:
             continue
         year = int(m.group(1))
-        inside = [x.strip() for x in m.group(2).split("|")]
-        for pair in inside:
-            dm = re.match(r"^\s*(\d+)\s*:\s*([0-9]+)\s*$", pair)
-            if not dm:
+        inside = m.group(2)
+
+        # split the inside by '|' into domain:count-ish pairs
+        for pair in re.split(r"[|]", inside):
+            pair = pair.strip()
+            if not pair:
                 continue
-            dom_id = dm.group(1).strip()
-            cnt    = _to_int_safe(dm.group(2))
-            dom_name = look["id2name"].get(dom_id, dom_id)  # 1..4 -> domain name
+
+            # try robust integer extraction
+            ints = re.findall(r"(-?\d+)", pair)
+            if len(ints) >= 2:
+                dom_id = ints[0]          # FIRST int -> domain id
+                cnt    = _to_int_safe(ints[-1])  # LAST int -> count
+            else:
+                # last fallback (rare): exact 'X : Y'
+                dm = re.match(r"^\s*([^\s:]+)\s*:\s*([0-9]+)\s*$", pair)
+                if not dm:
+                    continue
+                dom_id = dm.group(1).strip()
+                cnt    = _to_int_safe(dm.group(2))
+
+            dom_name = look["id2name"].get(str(dom_id), str(dom_id))
             rows.append((year, dom_name, cnt))
+
     df = pd.DataFrame(rows, columns=["year","domain","count"])
+    if df.empty:
+        return df
+
+    # keep only known domains; unknown -> "Other"
+    known = set(look.get("domain_order", []))
+    df["domain"] = df["domain"].apply(lambda d: d if d in known else "Other")
+
+    # aggregate duplicates (same year/domain repeated in the blob)
+    df = df.groupby(["year","domain"], as_index=False)["count"].sum()
     return df
 
 
@@ -810,8 +841,6 @@ def render_subfield_wordcloud(df_sub: pd.DataFrame, title: str):
     with c2:
         st.pyplot(fig_wc, use_container_width=False)
 
-
-# -------------------------- render one lab panel --------------------------
 
 # -------------------------- render one lab panel --------------------------
 
