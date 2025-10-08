@@ -26,15 +26,31 @@ from lib.taxonomy import (
     build_taxonomy_lookups,
     canonical_field_order,
     get_field_color,
+    get_subfield_color,
+    build_taxonomy_lookups,
 )
 
 # ---------------------------- paths & cache ----------------------------
 
-DATA_PATH = REPO_ROOT / "data" / "ul_units_indicators.parquet"
+UNITS_PATH = REPO_ROOT / "data" / "ul_units_indicators.parquet"
+PUBS_PATH  = REPO_ROOT / "data" / "pubs_final.parquet"  # used only for the inter-lab co-publications section
+
+YEAR_START, YEAR_END = 2019, 2023
+
+# Domain colors (legend for collab section)
+DOMAIN_COLORS = {
+    "Health Sciences": "#F85C32",
+    "Life Sciences": "#0CA750",
+    "Physical Sciences": "#8190FF",
+    "Social Sciences": "#FFCB3A",
+    "Other": "#7f7f7f",
+}
+
+# ------------------------------- loaders -------------------------------
 
 @st.cache_data(show_spinner=False)
 def load_units() -> pd.DataFrame:
-    df = pd.read_parquet(DATA_PATH)
+    df = pd.read_parquet(UNITS_PATH)
 
     # Normalize column names (strip only)
     df = df.rename(columns={c: c.strip() for c in df.columns})
@@ -42,6 +58,7 @@ def load_units() -> pd.DataFrame:
     # Ensure expected key columns exist (rename if casing differs)
     canon = {
         "unit name": "Unit Name",
+        "department": "Department",
         "type": "Type",
         "pubs": "Pubs",
         "pubs lue": "Pubs LUE",
@@ -62,6 +79,11 @@ def load_units() -> pd.DataFrame:
         "collab labs (by ror)": "Collab labs (by ROR)",
         "collab other structures (by ror)": "Collab other structures (by ROR)",
         "% international": "% international",
+        "% industrial": "% industrial",
+        "avg fwci (france)": "Avg FWCI (France)",
+        "% pubs (uni level)": "% Pubs (uni level)",
+        "% pubs lue (lab level)": "% Pubs LUE (lab level)",
+        "see in openalex": "See in OpenAlex",
         "top 10 int partners (name)": "Top 10 int partners (name)",
         "top 10 int partners (type)": "Top 10 int partners (type)",
         "top 10 int partners (country)": "Top 10 int partners (country)",
@@ -71,6 +93,11 @@ def load_units() -> pd.DataFrame:
         "top 10 fr partners (type)": "Top 10 FR partners (type)",
         "top 10 fr partners (copubs with lab)": "Top 10 FR partners (copubs with lab)",
         "top 10 fr partners (% of ul copubs)": "Top 10 FR partners (% of UL copubs)",
+        "top 10 authors (name)": "Top 10 authors (name)",
+        "top 10 authors (pubs)": "Top 10 authors (pubs)",
+        "top 10 authors (average fwci_fr)": "Top 10 authors (Average FWCI_FR)",
+        "top 10 authors (is lorraine)": "Top 10 authors (Is Lorraine)",
+        "top 10 authors (other lab(s))": "Top 10 authors (Other lab(s))",
         "ror": "ROR",
     }
     lower2actual = {c.lower(): c for c in df.columns}
@@ -83,10 +110,22 @@ def load_units() -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
     for c in ("PPtop10%", "PPtop1%", "% collab w/ another internal lab",
-              "% collab w/ another internal structure", "% international"):
+              "% collab w/ another internal structure", "% international",
+              "% industrial", "% Pubs (uni level)", "% Pubs LUE (lab level)"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "Avg FWCI (France)" in df.columns:
+        df["Avg FWCI (France)"] = pd.to_numeric(df["Avg FWCI (France)"], errors="coerce")
     return df
+
+@st.cache_data(show_spinner=False)
+def load_pubs() -> pd.DataFrame | None:
+    try:
+        df = pd.read_parquet(PUBS_PATH)
+        return df
+    except Exception as e:
+        st.warning(f"Could not load pubs_final.parquet at {PUBS_PATH}. The inter-lab collaboration section will be skipped.\n\n{e}")
+        return None
 
 @st.cache_data(show_spinner=False)
 def get_lookups() -> Dict:
@@ -287,7 +326,8 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
                        xmax: float,
                        title: str,
                        show_counts_gutter: bool = True) -> plt.Figure:
-    """Draw min—Q1—Median—Q3—Max whiskers per field (horizontal) with left count gutter."""
+    """Draw min—Q1—Median—Q3—Max whiskers per field (horizontal) with left count gutter.
+       Skip fields with count==0 or all stats are 0/NaN."""
     base = pd.DataFrame({"field_name": all_fields_order})
     df = base.merge(df_fwci, on="field_name", how="left").fillna(np.nan)
 
@@ -306,7 +346,7 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
     offset_data   = offset_px * data_per_px
     ax.set_xlim(-left_pad_data, xmax)
 
-    # draw per row (skip if count=0 OR all stats are 0/NaN)
+    # draw per row
     for i, r in df.iterrows():
         c = r.get("color", "#7f7f7f")
         cnt = int(r.get("count") or 0)
@@ -315,7 +355,6 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
         all_zero = (len(non_na) > 0 and all(float(x) == 0.0 for x in non_na))
         if cnt <= 0 or len(non_na) == 0 or all_zero:
             continue
-
         # whiskers
         if pd.notna(r.get("min")) and pd.notna(r.get("max")):
             ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
@@ -354,7 +393,7 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
 
 def plot_year_counts_bar(values: List[int], title: str, ymax: int | None = None) -> plt.Figure:
     """Simple vertical bar chart of totals per year (not stacked)."""
-    years = [2019 + i for i in range(len(values))]
+    years = [YEAR_START + i for i in range(len(values))]
     fig, ax = plt.subplots(figsize=(3.6, 2.6))
     ax.bar(years, values, width=0.6, color="#8190FF", edgecolor="none", alpha=0.9)
     ax.set_title(title, fontsize=12, pad=6)
@@ -366,6 +405,7 @@ def plot_year_counts_bar(values: List[int], title: str, ymax: int | None = None)
     ax.grid(axis="y", color="#eeeeee")
     for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
+    plt.tight_layout()
     return fig
 
 # ------------------------------ UI ------------------------------
@@ -375,10 +415,89 @@ st.title("🏭 Lab view — Field distribution (per lab)")
 
 look = get_lookups()
 df_units = load_units()
+df_pubs  = load_pubs()  # may be None
+
+# ----------------------------- topline before comparison -----------------------------
+
+st.subheader("Topline metrics (2019–2023)")
+k1, k2, k3 = st.columns(3)
+k1.metric("Number of labs", "61")
+k2.metric("Total publications", "26 541")
+k3.metric("% covered by the labs", "73,03 %")
+st.caption("Values provided by user; no computation performed.")
+
+st.divider()
+
+# -------------------------- per-lab overview table (from ul_units_indicators only) --------------------------
+
+st.subheader("Per-lab overview (2019–2023)")
+
+# Build overview (use only precomputed columns from ul_units_indicators)
+col_map = {
+    "ROR": "ROR",
+    "Unit Name": "Unit Name",
+    "Pubs": "Pubs",
+    "% Pubs (uni level)": "% Pubs (uni level)",
+    "Pubs LUE": "Pubs LUE",
+    "% Pubs LUE (lab level)": "% Pubs LUE (lab level)",
+    "% international": "% international",
+    "% industrial": "% industrial",
+    "Avg FWCI (France)": "Avg FWCI (France)",
+    "See in OpenAlex": "See in OpenAlex",
+}
+missing_cols = [c for c in col_map.values() if c not in df_units.columns]
+if missing_cols:
+    st.error(f"Missing columns in ul_units_indicators.parquet for overview table: {missing_cols}")
+else:
+    summary = df_units[list(col_map.values())].copy()
+    summary = summary.rename(columns={
+        "Unit Name": "Lab",
+        "Pubs": "Publications",
+        "% Pubs (uni level)": "% UL pubs",
+        "Pubs LUE": "Pubs LUE",
+        "% Pubs LUE (lab level)": "% LUE (lab)",
+        "% international": "% international",
+        "% industrial": "% industrial",
+        "Avg FWCI (France)": "Avg FWCI (FR)",
+        "See in OpenAlex": "OpenAlex",
+    })
+    # Display-friendly %
+    for pc in ["% UL pubs", "% LUE (lab)", "% international", "% industrial"]:
+        summary[pc] = pd.to_numeric(summary[pc], errors="coerce") * 100.0
+
+    summary = summary.sort_values("Publications", ascending=False)
+
+    # sensible maxima for progress columns
+    max_share = float(summary["% UL pubs"].max() or 1.0)
+    max_lue   = float(summary["% LUE (lab)"].max() or 1.0)
+    max_intl  = float(summary["% international"].max() or 1.0)
+    max_comp  = float(summary["% industrial"].max() or 1.0)
+
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Lab": st.column_config.TextColumn("Lab"),
+            "Publications": st.column_config.NumberColumn("Publications", format="%.0f"),
+            "% UL pubs": st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
+            "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
+            "% LUE (lab)": st.column_config.ProgressColumn("% of pubs LUE", format="%.1f %%", min_value=0.0, max_value=max_lue),
+            "% international": st.column_config.ProgressColumn("% international", format="%.1f %%", min_value=0.0, max_value=max_intl),
+            "% industrial": st.column_config.ProgressColumn("% with company", format="%.1f %%", min_value=0.0, max_value=max_comp),
+            "Avg FWCI (FR)": st.column_config.NumberColumn("Avg. FWCI (FR)", format="%.3f"),
+            "OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
+            "ROR": st.column_config.TextColumn("ROR"),
+        },
+    )
+
+st.divider()
+
+# -------------------- Lab selection & prep for per-lab panels --------------------
 
 # Filter labs and let user pick 2
-labs = df_units.loc[df_units["Type"].astype(str).str.lower() == "lab"].copy()
-lab_names = labs["Unit Name"].dropna().astype(str).sort_values().tolist()
+labs_only = df_units.loc[df_units["Type"].astype(str).str.lower() == "lab"].copy()
+lab_names = labs_only["Unit Name"].dropna().astype(str).sort_values().tolist()
 if not lab_names:
     st.error("No units of Type = 'lab' found.")
     st.stop()
@@ -390,8 +509,8 @@ with sel_b:
     default_idx = 1 if len(lab_names) > 1 else 0
     unit2 = st.selectbox("Select unit B (lab)", lab_names, index=default_idx, key="unit_b")
 
-row1 = labs.loc[labs["Unit Name"] == unit1].iloc[0]
-row2 = labs.loc[labs["Unit Name"] == unit2].iloc[0]
+row1 = labs_only.loc[labs_only["Unit Name"] == unit1].iloc[0]
+row2 = labs_only.loc[labs_only["Unit Name"] == unit2].iloc[0]
 
 # Precompute field tables & shared scales/orders --------------------------------
 df_f1 = build_fields_table(row1, look)
@@ -431,7 +550,7 @@ def pad_table_rows(df: pd.DataFrame, n_rows: int, numeric_cols: List[str] | None
     filler_df = pd.DataFrame([filler] * missing)
     return pd.concat([d, filler_df], ignore_index=True)
 
-# -------------------------- render one lab panel --------------------------
+# -------------------------- parse helpers (partners/authors) --------------------------
 
 def parse_partner_ror_counts(blob: str) -> pd.DataFrame:
     if pd.isna(blob) or not str(blob).strip():
@@ -465,6 +584,30 @@ def parse_parallel_lists(names_blob: str, *more_blobs: str) -> pd.DataFrame:
     if len(cols) > 4: df["% UL copubs"] = [ _to_float_safe(x) for x in cols[4] ]
     return df
 
+def parse_authors(row: pd.Series) -> pd.DataFrame:
+    names = str(row.get("Top 10 authors (name)", "")).split("|") if row.get("Top 10 authors (name)", "") else []
+    pubs  = [ _to_int_safe(x) for x in str(row.get("Top 10 authors (pubs)", "")).split("|") ] if row.get("Top 10 authors (pubs)", "") else []
+    fwci  = [ _to_float_safe(x) for x in str(row.get("Top 10 authors (Average FWCI_FR)", "")).split("|") ] if row.get("Top 10 authors (Average FWCI_FR)", "") else []
+    isul  = [ s.strip().lower() in ("true","1","yes") for s in str(row.get("Top 10 authors (Is Lorraine)", "")).split("|") ] if row.get("Top 10 authors (Is Lorraine)", "") else []
+    other = str(row.get("Top 10 authors (Other lab(s))", "")).split("|") if row.get("Top 10 authors (Other lab(s))", "") else []
+    n = max(len(names), len(pubs), len(fwci), len(isul), len(other))
+    def pad(lst, fill): return lst + [fill]*(n-len(lst))
+    names = pad([x.strip() for x in names], "")
+    pubs  = pad(pubs, np.nan)
+    fwci  = pad(fwci, np.nan)
+    isul  = pad(isul, "")
+    other = pad([x.strip() for x in other], "")
+    df = pd.DataFrame({
+        "Author": names,
+        "Pubs": pubs,
+        "Avg FWCI (FR)": fwci,
+        "Is UL": ["Yes" if x is True else ("No" if x is False else "") for x in isul],
+        "Other UL lab(s)": [s.replace(";", ", ") for s in other],
+    })
+    return df
+
+# -------------------------- render one lab panel --------------------------
+
 def render_lab_panel(container, row: pd.Series, unit_name: str,
                      df_fields: pd.DataFrame, df_fwci: pd.DataFrame,
                      yearly_values: List[int], yearly_ymax: int):
@@ -497,8 +640,8 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
 
         st.markdown("---")
 
-        # --- Internal collaborations ---
-        st.markdown("#### Internal collaborations")
+        # --- Top 5 internal partners ---
+        st.markdown("#### Top 5 internal partners")
 
         ck1, ck2, ck3, ck4 = st.columns(4)
         ck1.metric("Co-pubs with another lab", f"{int(row.get('Collab pubs (other labs)',0)):,}".replace(",", " "))
@@ -511,12 +654,18 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         partners = pd.concat([partners_labs, partners_other], ignore_index=True)
         if not partners.empty:
             partners = partners.groupby("ROR", as_index=False)["count"].sum().sort_values("count", ascending=False)
-            # Map ROR -> Unit Name when possible (hide ROR in table)
-            ror2name = df_units.set_index("ROR")["Unit Name"].to_dict() if "ROR" in df_units.columns else {}
-            partners["Name"] = partners["ROR"].map(ror2name).fillna(partners["ROR"])
-            top5 = partners[["Name","count"]].rename(columns={"count":"Co-pubs"})
+            # Enrich with Name / Department / Type from ul_units_indicators
+            if {"ROR","Unit Name","Department","Type"}.issubset(df_units.columns):
+                ref = df_units[["ROR","Unit Name","Department","Type"]].drop_duplicates()
+                partners = partners.merge(ref, on="ROR", how="left")
+                partners["Name"] = partners["Unit Name"].fillna(partners["ROR"])
+            else:
+                partners["Name"] = partners["ROR"]
+                partners["Department"] = ""
+                partners["Type"] = ""
+            top5 = partners[["Name","Department","Type","count"]].rename(columns={"count":"Co-pubs"})
         else:
-            top5 = pd.DataFrame(columns=["Name","Co-pubs"])
+            top5 = pd.DataFrame(columns=["Name","Department","Type","Co-pubs"])
 
         # enforce exactly 5 rows (pad with blanks)
         top5 = pad_table_rows(top5, 5, numeric_cols=["Co-pubs"])
@@ -524,8 +673,8 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
 
         st.markdown("---")
 
-        # --- International partners ---
-        st.markdown("#### International partners")
+        # --- Top 10 International Partners ---
+        st.markdown("#### Top 10 International Partners")
         st.metric("% international publications", f"{((row.get('% international') or 0)*100):.1f}%")
 
         intl_df = parse_parallel_lists(
@@ -535,25 +684,20 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
             row.get("Top 10 int partners (copubs with lab)", ""),
             row.get("Top 10 int partners (% of UL copubs)", ""),
         )
-        # visible table (exactly 10 rows)
-        vis_cols = ["name","country","copubs"]
-        intl_vis = intl_df[vis_cols] if not intl_df.empty else pd.DataFrame(columns=vis_cols)
-        intl_vis = intl_vis.rename(columns={"name":"Partner","country":"Country","copubs":"Co-pubs"})
-        intl_vis = pad_table_rows(intl_vis, 10, numeric_cols=["Co-pubs"])
-        st.dataframe(intl_vis, use_container_width=True, hide_index=True)
-
-        with st.expander("Show additional columns"):
-            extra_cols = ["name","type","% UL copubs"]
-            intl_extra = intl_df[extra_cols] if not intl_df.empty else pd.DataFrame(columns=extra_cols)
-            intl_extra = intl_extra.rename(columns={"name":"Partner","type":"Type","% UL copubs":"% of UL co-pops"})
-            # keep same 10 rows (pad)
-            intl_extra = pad_table_rows(intl_extra, 10, numeric_cols=["% of UL co-pops"])
-            st.dataframe(intl_extra, use_container_width=True, hide_index=True)
+        if intl_df.empty:
+            intl_df = pd.DataFrame(columns=["name","country","copubs","type","% UL copubs"])
+        # multiply % by 100 and rename
+        intl_df["% of UL copubs with this partner"] = pd.to_numeric(intl_df.get("% UL copubs"), errors="coerce") * 100.0
+        intl_df = intl_df.rename(columns={
+            "name":"Partner","country":"Country","copubs":"Co-pubs","type":"Type"
+        })[["Partner","Country","Co-pubs","Type","% of UL copubs with this partner"]]
+        intl_df = pad_table_rows(intl_df, 10, numeric_cols=["Co-pubs","% of UL copubs with this partner"])
+        st.dataframe(intl_df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
-        # --- French partners ---
-        st.markdown("#### French partners")
+        # --- Top 10 French Partners ---
+        st.markdown("#### Top 10 French Partners")
         fr_df = parse_parallel_lists(
             row.get("Top 10 FR partners (name)", ""),
             row.get("Top 10 FR partners (type)", ""),
@@ -561,22 +705,175 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
             row.get("Top 10 FR partners (copubs with lab)", ""),
             row.get("Top 10 FR partners (% of UL copubs)", ""),
         )
-        fr_vis_cols = ["name","copubs","% UL copubs"]
-        fr_vis = fr_df[fr_vis_cols] if not fr_df.empty else pd.DataFrame(columns=fr_vis_cols)
-        fr_vis["Country"] = "France"
-        fr_vis = fr_vis.rename(columns={"name":"Partner","copubs":"Co-pubs","% UL copubs":"% of UL co-pops"})
-        fr_vis = fr_vis[["Partner","Country","Co-pubs","% of UL co-pops"]]
-        fr_vis = pad_table_rows(fr_vis, 10, numeric_cols=["Co-pubs","% of UL co-pops"])
-        st.dataframe(fr_vis, use_container_width=True, hide_index=True)
+        if fr_df.empty:
+            fr_df = pd.DataFrame(columns=["name","type","copubs","% UL copubs"])
+        fr_df["% of UL copubs with this partner"] = pd.to_numeric(fr_df.get("% UL copubs"), errors="coerce") * 100.0
+        fr_df = fr_df.rename(columns={
+            "name":"Partner","type":"Type","copubs":"Co-pubs"
+        })[["Partner","Co-pubs","Type","% of UL copubs with this partner"]]
+        fr_df = pad_table_rows(fr_df, 10, numeric_cols=["Co-pubs","% of UL copubs with this partner"])
+        st.dataframe(fr_df, use_container_width=True, hide_index=True)
 
-        with st.expander("Show additional columns"):
-            fr_extra = (fr_df[["name","type"]].rename(columns={"name":"Partner","type":"Type"})
-                        if not fr_df.empty else pd.DataFrame(columns=["Partner","Type"]))
-            fr_extra = pad_table_rows(fr_extra, 10, numeric_cols=None)
-            st.dataframe(fr_extra, use_container_width=True, hide_index=True)
+        st.markdown("---")
+
+        # --- Top 10 Authors ---
+        st.markdown("#### Top 10 Authors")
+        authors = parse_authors(row)
+        authors = pad_table_rows(authors, 10, numeric_cols=["Pubs","Avg FWCI (FR)"])
+        st.dataframe(authors, use_container_width=True, hide_index=True)
 
 # -------------------------- Two panels side by side --------------------------
 colA, colB = st.columns(2)
 
 render_lab_panel(colA, row1, unit1, df_f1, df_w1, ycounts1, ymax_year)
 render_lab_panel(colB, row2, unit2, df_f2, df_w2, ycounts2, ymax_year)
+
+st.divider()
+
+# =========================== Inter-lab co-publications (from pubs_final.parquet) ===========================
+
+st.subheader(f"Co-publications between **{unit1}** and **{unit2}** (2019–2023)")
+
+if df_pubs is None:
+    st.info("Inter-lab collaboration details unavailable because pubs_final.parquet could not be loaded.")
+else:
+    # --- columns (exact schema of pubs_final.parquet) ---
+    col_year        = "Publication Year"
+    col_openalex    = "OpenAlex ID"
+    col_fwci        = "FWCI_FR"
+    col_labs_rors   = "Labs_RORs"
+    col_is_lue      = "In_LUE"
+    col_top10       = "Is_PPtop10%_(field)"
+    col_top1        = "Is_PPtop1%_(field)"
+    col_subfield_id = "Primary Subfield ID"
+    col_topic       = "Primary Topic"
+
+    # Minimal sanity check
+    missing_core = [c for c in [col_year, col_labs_rors] if c not in df_pubs.columns]
+    if missing_core:
+        st.warning(f"Cannot compute co-publication stats — missing columns in pubs_final.parquet: {missing_core}")
+    else:
+        # restrict period
+        pubs = df_pubs.copy()
+        pubs = pubs[(pubs[col_year] >= YEAR_START) & (pubs[col_year] <= YEAR_END)]
+
+        # normalize labs ROR list
+        def to_ror_list(x):
+            if isinstance(x, (list, tuple)):
+                return [str(s).strip() for s in x]
+            s = str(x)
+            if not s or s.lower() == "none" or s == "nan":
+                return []
+            parts = re.split(r"[|;,]", s)
+            return [p.strip() for p in parts if p.strip()]
+
+        ror1 = str(row1.get("ROR", "")).strip()
+        ror2 = str(row2.get("ROR", "")).strip()
+
+        pubs["_lab_rors"] = pubs[col_labs_rors].apply(to_ror_list)
+        mask = pubs["_lab_rors"].apply(lambda lst: (ror1 in lst) and (ror2 in lst))
+        copubs = pubs.loc[mask].copy()
+
+        # KPIs
+        n_copubs = int(len(copubs))
+        if col_is_lue:
+            lue_count   = int(copubs[col_is_lue].fillna(False).astype(bool).sum()) if col_is_lue in copubs.columns else 0
+            lue_pct = (lue_count / max(n_copubs, 1)) * 100.0
+        else:
+            lue_count, lue_pct = 0, 0.0
+
+        top10_count = int(copubs[col_top10].fillna(False).astype(bool).sum())  if col_top10  in copubs.columns else 0
+        top1_count  = int(copubs[col_top1].fillna(False).astype(bool).sum())   if col_top1   in copubs.columns else 0
+        avg_fwci = float(pd.to_numeric(copubs[col_fwci], errors="coerce").mean()) if col_fwci else float("nan")
+
+        mk1, mk2, mk3, mk4, mk5 = st.columns(5)
+        mk1.metric("Co-publications", f"{n_copubs:,}".replace(",", " "))
+        mk2.metric("… incl. LUE (count)", f"{lue_count:,}".replace(",", " "))
+        mk3.metric("… incl. LUE (%)", f"{lue_pct:.1f}%")
+        mk4.metric("… Top 10% (count)", f"{top10_count:,}".replace(",", " "))
+        mk5.metric("… Top 1% (count)", f"{top1_count:,}".replace(",", " "))
+
+        if not np.isnan(avg_fwci):
+            st.metric("Average FWCI (FR) of co-pubs", f"{avg_fwci:.3f}")
+
+        # Yearly distribution bar
+        if col_year:
+            ydist = copubs.groupby(col_year)[col_year].count().rename("count").reset_index()
+            years = [y for y in range(YEAR_START, YEAR_END+1)]
+            yvals = [int(ydist.loc[ydist[col_year]==y, "count"].sum()) for y in years]
+            fig_y = plot_year_counts_bar(yvals, "Yearly co-publications", ymax=max(yvals) if yvals else None)
+            st.pyplot(fig_y, use_container_width=True)
+
+        # Subfield counts horizontal bars
+        if col_subfield_id:
+            sub_counts = (copubs
+                          .assign(_sub= pd.to_numeric(copubs[col_subfield_id], errors="coerce").astype("Int64"))
+                          .dropna(subset=["_sub"]))
+            sub_counts = sub_counts.groupby("_sub").size().reset_index(name="count").sort_values("count", ascending=False)
+            # map to names & colors
+            lookups = build_taxonomy_lookups()
+            id2name = lookups.get("id2name", {})
+            sub_counts["name"] = sub_counts["_sub"].astype(str).map(id2name).fillna(sub_counts["_sub"].astype(str))
+            sub_counts["color"] = sub_counts["_sub"].astype(str).apply(get_subfield_color)
+
+            # plot
+            y = np.arange(len(sub_counts))
+            fig_h = max(1.0, 0.35 * len(sub_counts) + 0.8)
+            fig, ax = plt.subplots(figsize=(7.6, fig_h))
+            ax.barh(y, sub_counts["count"], color=sub_counts["color"], edgecolor="none", alpha=0.95)
+            ax.set_yticks(y)
+            ax.set_yticklabels(sub_counts["name"], fontsize=10)
+            ax.invert_yaxis()
+            ax.grid(axis="x", color="#eeeeee")
+            ax.set_xlabel("Co-publications (count)", fontsize=11)
+            ax.set_title("Co-publications by primary subfield", fontsize=12, pad=6)
+            for spine in ("top","right","left"):
+                ax.spines[spine].set_visible(False)
+            plt.tight_layout()
+
+            # legend row (HTML, not generated by matplotlib)
+            legend_items = "".join(
+                f'<div class="legend-item"><span class="legend-swatch" style="background:{DOMAIN_COLORS[d]};"></span>{d}</div>'
+                for d in ["Health Sciences","Life Sciences","Physical Sciences","Social Sciences"]
+            )
+            st.markdown(
+                """
+                <style>
+                .legend-row { display:flex; gap:12px; align-items:center; margin: 0 0 6px 4px;}
+                .legend-item { display:flex; align-items:center; gap:6px; font-size: 0.9rem; color:#333;}
+                .legend-swatch { display:inline-block; width:14px; height:14px; border-radius:3px; }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+            st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
+            st.pyplot(fig, use_container_width=True)
+
+        # Wordcloud of topics
+        if col_topic:
+            topics = copubs[col_topic].dropna().astype(str).tolist()
+            try:
+                from wordcloud import WordCloud
+                text = " ".join([t.replace("|"," ").replace(";"," ") for t in topics])
+                if text.strip():
+                    wc = WordCloud(width=900, height=400, background_color="white").generate(text)
+                    fig_wc, ax_wc = plt.subplots(figsize=(8, 3.6))
+                    ax_wc.imshow(wc, interpolation="bilinear")
+                    ax_wc.axis("off")
+                    ax_wc.set_title("Topics word cloud", fontsize=12, pad=6)
+                    st.pyplot(fig_wc, use_container_width=True)
+                else:
+                    st.info("No topics to display for wordcloud.")
+            except Exception:
+                st.info("Install `wordcloud` to see the topics cloud (e.g., `pip install wordcloud`).")
+
+        # Download CSV of co-pubs
+        if col_openalex is None:
+            col_openalex = "row_index"
+            copubs["row_index"] = np.arange(len(copubs))
+        st.download_button(
+            "Download co-publications (CSV)",
+            data=copubs.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"copubs_{unit1}_AND_{unit2}_{YEAR_START}-{YEAR_END}.csv",
+            mime="text/csv",
+        )
