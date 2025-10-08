@@ -263,32 +263,50 @@ def field_id_to_name(field_id_or_name: str) -> str:
 def topic_id_to_name(topic_id_or_name: str) -> str:
     """
     Normalize a topic token (id like 'T13054' or name) to a topic name string.
-    If not resolvable, returns the original token.
     """
     tok = str(topic_id_or_name).strip()
     look = build_taxonomy_lookups()
-    # if already a name
+    # if already a known name
     if tok in look["name2id"]:
         return tok
-    # try id -> name
+    # id -> name
     return look["id2name"].get(tok, tok)
 
 @lru_cache(maxsize=None)
 def get_topic_color(topic_name_or_id: str) -> str:
     """
-    Topic inherits its parent domain color.
+    Color for a topic (by its domain).
     """
-    tok = str(topic_name_or_id).strip()
     tdf = _load_topics()
-    # Resolve by id first
+    tok = str(topic_name_or_id).strip()
+    # try by id
     m = tdf.loc[tdf["topic_id"].astype(str) == tok]
     if m.empty:
         # try by name
         m = tdf.loc[tdf.get("topic_name", "").astype(str) == tok]
     if not m.empty:
-        dom = m["domain_name"].iloc[0]
-        return get_domain_color(dom)
+        return get_domain_color(m["domain_name"].iloc[0])
     return _DOMAIN_COLORS["Other"]
+
+
+@lru_cache(maxsize=None)
+def get_domain_for_subfield(subfield_name_or_id: str) -> str:
+    """
+    Return the parent domain name for a given subfield (name or numeric id).
+    """
+    look = build_taxonomy_lookups()
+    sub = str(subfield_name_or_id).strip()
+    # resolve ID -> subfield name if needed
+    if sub.isdigit():
+        sub = look["id2name"].get(sub, sub)
+    # find field containing this subfield
+    for field_name, subs in look["subfields_by_field"].items():
+        if sub in subs:
+            # find domain that contains this field
+            for dom, fields in look["fields_by_domain"].items():
+                if field_name in fields:
+                    return dom
+    return "Other"
 
 # --------------------------- conveniences --------------------------
 
