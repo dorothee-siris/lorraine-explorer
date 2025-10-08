@@ -915,7 +915,7 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
             df_sub = parse_subfield_counts_blob(row.get("By subfield: counts", ""), look)
         else:
             df_sub = None
-        render_subfield_wordcloud(df_sub)
+        render_subfield_wordcloud(df_sub," ")
 
         # --- Thematic distribution (fields) ---
         st.markdown("#### Distribution per field (% of lab totals)")
