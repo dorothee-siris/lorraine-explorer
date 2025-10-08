@@ -694,12 +694,30 @@ if not lab_names:
     st.error("No units of Type = 'lab' found.")
     st.stop()
 
+# Choose your preferred defaults by *name*
+DEFAULT_LABS = ["LRGP", "IJL"]  # <-- change to your two labs
+
+def _default_indices(all_names, defaults):
+    # try to find both; fall back to first two distinct labs
+    idx = []
+    for d in defaults:
+        if d in all_names:
+            idx.append(all_names.index(d))
+    if len(idx) < 2:
+        # fallback to first two distinct
+        idx = [0, 1 if len(all_names) > 1 else 0]
+    if idx[0] == idx[1]:
+        idx[1] = (idx[0] + 1) % max(1, len(all_names))
+    return idx[0], idx[1]
+
+idx_a, idx_b = _default_indices(lab_names, DEFAULT_LABS)
+
 sel_a, sel_b = st.columns(2)
 with sel_a:
-    unit1 = st.selectbox("Select unit A (lab)", lab_names, index=0, key="unit_a")
+    unit1 = st.selectbox("Select unit A (lab)", lab_names, index=idx_a, key="unit_a")
 with sel_b:
     default_idx = 1 if len(lab_names) > 1 else 0
-    unit2 = st.selectbox("Select unit B (lab)", lab_names, index=default_idx, key="unit_b")
+    unit2 = st.selectbox("Select unit B (lab)", lab_names, index=idx_b, key="unit_b")
 
 row1 = labs_only.loc[labs_only["Unit Name"] == unit1].iloc[0]
 row2 = labs_only.loc[labs_only["Unit Name"] == unit2].iloc[0]
