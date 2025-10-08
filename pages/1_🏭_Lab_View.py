@@ -944,7 +944,7 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         st.pyplot(fig_fields, use_container_width=True)
 
         # --- FWCI whiskers (with counts gutter) ---
-        st.markdown("#### Field distribution of FWCI values (baseline = France)")
+        st.markdown("#### Field distribution of FWCI values (vs France)")
         fig_fwci = plot_fwci_whiskers(
             df_fwci, fields_union_fwci, xmax_fwci,
             " ", show_counts_gutter=True
