@@ -419,16 +419,19 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
                        xmax: float,
                        title: str,
                        show_counts_gutter: bool = True) -> plt.Figure:
-    """Draw min—Q1—Median—Q3—Max whiskers per field (horizontal) with left count gutter.
-       Skip fields with count==0 or all stats are 0/NaN."""
+    """
+    Draw min—Q1—Median—Q3—Max whiskers per field (horizontal) with a left count gutter.
+    - Y labels show ONLY the field names (like the field % plot).
+    - Bars/shapes are skipped if count==0 or all stats are 0/NaN.
+    """
     base = pd.DataFrame({"field_name": all_fields_order})
     df = base.merge(df_fwci, on="field_name", how="left").fillna(np.nan)
 
     y = np.arange(len(df))
-    fig_h = max(1.0, 0.40 * len(df) + 0.8)
+    fig_h = max(1.0, 0.42 * len(df) + 0.8)  # match the field % plot density
     fig, ax = plt.subplots(figsize=(7.2, fig_h))
 
-    # left gutter
+    # left gutter (same approach as in field % plot)
     left_pad_px, offset_px = (72, 6)
     ax.set_xlim(0, xmax)
     fig.canvas.draw()
@@ -441,62 +444,46 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
 
     # draw per row
     for i, r in df.iterrows():
-        c = r.get("color", "#7f7f7f")
-        cnt = int(r.get("count") or 0)
+        c   = r.get("color", "#7f7f7f")
+        cnt = int((r.get("count") or 0))
 
-        # collect stats
         stats = [r.get("min"), r.get("q1"), r.get("med"), r.get("q3"), r.get("max")]
         non_na = [x for x in stats if pd.notna(x)]
         all_zero = (len(non_na) > 0 and all(float(x) == 0.0 for x in non_na))
 
-        if len(non_na) == 0 or all_zero:
-            # No FWCI stats -> draw a small neutral tick at 0 so the row is visible
-            ax.vlines(0.0, ymin=y[i]-0.12, ymax=y[i]+0.12, color="#bbbbbb", linewidth=1.2, zorder=2)
-        else:
-            # whiskers
-            if pd.notna(r.get("min")) and pd.notna(r.get("max")):
-                ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
-            # box (Q1-Q3)
-            if pd.notna(r.get("q1")) and pd.notna(r.get("q3")) and r["q3"] >= r["q1"]:
-                ax.barh(y[i], width=r["q3"]-r["q1"], left=r["q1"], height=0.5,
-                        color=c, alpha=0.25, edgecolor="none", zorder=3)
-            # median
-            if pd.notna(r.get("med")):
-                ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
+        # Skip drawing if no data (count==0) or all stats are zero/NaN
+        if cnt <= 0 or len(non_na) == 0 or all_zero:
+            continue
 
+        # whiskers
+        if pd.notna(r.get("min")) and pd.notna(r.get("max")):
+            ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
+        # box (Q1-Q3)
+        if pd.notna(r.get("q1")) and pd.notna(r.get("q3")) and r["q3"] >= r["q1"]:
+            ax.barh(y[i], width=r["q3"]-r["q1"], left=r["q1"], height=0.5,
+                    color=c, alpha=0.25, edgecolor="none", zorder=3)
+        # median
+        if pd.notna(r.get("med")):
+            ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
 
-    # gutter counts (print even when zero)
+    # gutter counts (same visual placement as field % plot)
     if show_counts_gutter:
-        counts = df.get("count")
-        if counts is not None:
-            for yi, cnt in enumerate(pd.Series(counts).fillna(0).astype(int).tolist()):
-                ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
-                        va="center", ha="left", fontsize=9, color="#444")
+        counts_list = pd.Series(df.get("count")).fillna(0).astype(int).tolist()
+        for yi, cnt in enumerate(counts_list):
+            ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
+                    va="center", ha="left", fontsize=9, color="#444")
 
-
-    # axes & cosmetics
+    # axes — mirror field % chart
     ax.set_title(title, fontsize=12, pad=6)
-
-    # consistent labels with counts on both sides
-    counts_series = pd.Series(df.get("count")).fillna(0).astype(int)
-
-    def _strip_trailing_count(s: str) -> str:
-        # remove any trailing " – 12" or "- 12"
-        return re.sub(r"\s*[–-]\s*\d+\s*$", "", str(s))
-
-    base_names = [_strip_trailing_count(n) for n in df["field_name"]]
-    labels = [f"{n} – {cnt}" for n, cnt in zip(base_names, counts_series)]
-
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=10)
-
+    ax.set_yticklabels(df["field_name"], fontsize=10)
     ax.invert_yaxis()
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
     ax.set_xlim(-left_pad_data, xmax)
     ax.set_xlabel("FWCI (France)", fontsize=11)
 
-    for spine in ("top","right","left"):
+    for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
 
     plt.tight_layout()
