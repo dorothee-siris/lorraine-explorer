@@ -263,29 +263,53 @@ def field_id_to_name(field_id_or_name: str) -> str:
 def topic_id_to_name(topic_id_or_name: str) -> str:
     """
     Normalize a topic token (id like 'T13054' or name) to a topic name string.
+    Prefers direct lookup in all_topics.parquet.
     """
     tok = str(topic_id_or_name).strip()
-    look = build_taxonomy_lookups()
-    # if already a known name
-    if tok in look["name2id"]:
+    tdf = _load_topics()
+
+    # If it's an ID present in the table → return its name
+    m = tdf.loc[tdf["topic_id"].astype(str) == tok]
+    if not m.empty and "topic_name" in m.columns:
+        return str(m["topic_name"].iloc[0])
+
+    # If it's already a name present in the table → return as-is
+    if "topic_name" in tdf.columns and (tdf["topic_name"].astype(str) == tok).any():
         return tok
-    # id -> name
+
+    # Fallback to the generic registry if any
+    look = build_taxonomy_lookups()
     return look["id2name"].get(tok, tok)
+
 
 @lru_cache(maxsize=None)
 def get_topic_color(topic_name_or_id: str) -> str:
     """
-    Color for a topic (by its domain).
+    Color for a topic (by its domain). Prefer subfield→domain mapping for consistency
+    with subfield charts; fall back to topic's own domain_name if needed.
     """
     tdf = _load_topics()
     tok = str(topic_name_or_id).strip()
-    # try by id
-    m = tdf.loc[tdf["topic_id"].astype(str) == tok]
-    if m.empty:
-        # try by name
-        m = tdf.loc[tdf.get("topic_name", "").astype(str) == tok]
+
+    # Match by id or by name
+    m = tdf[(tdf["topic_id"].astype(str) == tok)]
+    if m.empty and "topic_name" in tdf.columns:
+        m = tdf[tdf["topic_name"].astype(str) == tok]
+
     if not m.empty:
-        return get_domain_color(m["domain_name"].iloc[0])
+        # Prefer domain derived from the subfield(s) of the topic
+        if "subfield_id" in m.columns:
+            subs = m["subfield_id"].dropna().astype("Int64").astype(str).tolist()
+            doms = [get_domain_for_subfield(sf) for sf in subs]
+            # pick first non-"Other" if any
+            dom = next((d for d in doms if d and d != "Other"), None)
+            if dom:
+                return get_domain_color(dom)
+
+        # Fallback to the domain_name in the topics table
+        if "domain_name" in m.columns and pd.notna(m["domain_name"].iloc[0]):
+            return get_domain_color(str(m["domain_name"].iloc[0]))
+
     return _DOMAIN_COLORS["Other"]
 
 

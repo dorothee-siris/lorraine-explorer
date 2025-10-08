@@ -441,6 +441,8 @@ col_map = {
     "% Pubs (uni level)": "% Pubs (uni level)",
     "Pubs LUE": "Pubs LUE",
     "% Pubs LUE (lab level)": "% Pubs LUE (lab level)",
+    "% collab w/ another internal lab": "% collab w/ another internal lab",
+    "% collab w/ another internal structure": "% collab w/ another internal structure",
     "% international": "% international",
     "% industrial": "% industrial",
     "Avg FWCI (France)": "Avg FWCI (France)",
@@ -458,6 +460,8 @@ else:
     max_lue   = float((summary["% Pubs LUE (lab level)"] * 100.0).max() or 1.0)
     max_intl  = float((summary["% international"] * 100.0).max() or 1.0)
     max_comp  = float((summary["% industrial"] * 100.0).max() or 1.0)
+    max_collab_lab   = float(summary["% internal collabs (lab)"].max() or 1.0)
+    max_collab_other = float(summary["% internal collabs (other)"].max() or 1.0)
 
     summary = summary.rename(columns={
         "Unit Name": "Lab",
@@ -465,6 +469,8 @@ else:
         "% Pubs (uni level)": "% UL pubs",
         "Pubs LUE": "Pubs LUE",
         "% Pubs LUE (lab level)": "% LUE (lab)",
+        "% collab w/ another internal lab": "% internal collabs (lab)",
+        "% collab w/ another internal structure": "% internal collabs (other)",
         "% international": "% international",
         "% industrial": "% industrial",
         "Avg FWCI (France)": "Avg FWCI (FR)",
@@ -472,7 +478,7 @@ else:
     })
 
     # display-friendly %
-    for pc in ["% UL pubs", "% LUE (lab)", "% international", "% industrial"]:
+    for pc in ["% UL pubs", "% LUE (lab)","% internal collabs (lab)","% internal collabs (other)", "% international", "% industrial"]:
         summary[pc] = pd.to_numeric(summary[pc], errors="coerce") * 100.0
 
     summary = summary.sort_values("Publications", ascending=False)
@@ -482,7 +488,7 @@ else:
         use_container_width=True,
         hide_index=True,
         column_order=[
-            "Lab", "Publications", "% UL pubs", "Pubs LUE", "% LUE (lab)",
+            "Lab", "Publications", "% UL pubs", "Pubs LUE", "% LUE (lab)","% internal collabs (lab)", "% internal collabs (other)",
             "% international", "% industrial", "Avg FWCI (FR)", "OpenAlex", "ROR"  # ROR last
         ],
         column_config={
@@ -491,6 +497,8 @@ else:
             "% UL pubs":   st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
             "Pubs LUE":    st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
             "% LUE (lab)": st.column_config.ProgressColumn("% of pubs LUE",            format="%.1f %%", min_value=0.0, max_value=max_lue),
+            "% internal collabs (lab)": st.column_config.ProgressColumn("% internal collabs (lab)", format="%.1f %%", min_value=0.0, max_value=max_collab_lab),
+            "% internal collabs (other)": st.column_config.ProgressColumn("% internal collabs (other)", format="%.1f %%", min_value=0.0, max_value=max_collab_other),
             "% international": st.column_config.ProgressColumn("% international",      format="%.1f %%", min_value=0.0, max_value=max_intl),
             "% industrial":    st.column_config.ProgressColumn("% with company",       format="%.1f %%", min_value=0.0, max_value=max_comp),
             "Avg FWCI (FR)": st.column_config.NumberColumn("Avg. FWCI (FR)", format="%.3f"),
