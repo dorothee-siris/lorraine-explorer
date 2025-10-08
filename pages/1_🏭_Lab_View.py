@@ -443,35 +443,48 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
     for i, r in df.iterrows():
         c = r.get("color", "#7f7f7f")
         cnt = int(r.get("count") or 0)
+
+        # collect stats
         stats = [r.get("min"), r.get("q1"), r.get("med"), r.get("q3"), r.get("max")]
         non_na = [x for x in stats if pd.notna(x)]
         all_zero = (len(non_na) > 0 and all(float(x) == 0.0 for x in non_na))
-        if cnt <= 0 or len(non_na) == 0 or all_zero:
-            continue
-        # whiskers
-        if pd.notna(r.get("min")) and pd.notna(r.get("max")):
-            ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
-        # box (Q1-Q3)
-        if pd.notna(r.get("q1")) and pd.notna(r.get("q3")) and r["q3"] >= r["q1"]:
-            ax.barh(y[i], width=r["q3"]-r["q1"], left=r["q1"], height=0.5,
-                    color=c, alpha=0.25, edgecolor="none", zorder=3)
-        # median
-        if pd.notna(r.get("med")):
-            ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
 
-    # gutter counts
+        if len(non_na) == 0 or all_zero:
+            # No FWCI stats -> draw a small neutral tick at 0 so the row is visible
+            ax.vlines(0.0, ymin=y[i]-0.12, ymax=y[i]+0.12, color="#bbbbbb", linewidth=1.2, zorder=2)
+        else:
+            # whiskers
+            if pd.notna(r.get("min")) and pd.notna(r.get("max")):
+                ax.hlines(y[i], xmin=r["min"], xmax=r["max"], color=c, linewidth=1.2, zorder=2)
+            # box (Q1-Q3)
+            if pd.notna(r.get("q1")) and pd.notna(r.get("q3")) and r["q3"] >= r["q1"]:
+                ax.barh(y[i], width=r["q3"]-r["q1"], left=r["q1"], height=0.5,
+                        color=c, alpha=0.25, edgecolor="none", zorder=3)
+            # median
+            if pd.notna(r.get("med")):
+                ax.vlines(r["med"], ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
+
+
+    # gutter counts (print even when zero)
     if show_counts_gutter:
         counts = df.get("count")
         if counts is not None:
             for yi, cnt in enumerate(pd.Series(counts).fillna(0).astype(int).tolist()):
-                if cnt > 0:
-                    ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
-                            va="center", ha="left", fontsize=9, color="#444")
+                ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
+                        va="center", ha="left", fontsize=9, color="#444")
+
 
     # axes & cosmetics
     ax.set_title(title, fontsize=12, pad=6)
     ax.set_yticks(y)
     ax.set_yticklabels(df["field_name"], fontsize=10)
+
+    # consistent labels with counts on both sides
+    counts_series = pd.Series(df.get("count")).fillna(0).astype(int)
+    labels = [f"{n} – {cnt}" for n, cnt in zip(df["field_name"], counts_series)]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=10)
+
     ax.invert_yaxis()
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
