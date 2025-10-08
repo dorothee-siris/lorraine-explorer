@@ -400,8 +400,8 @@ def plot_unit_fields_barh(df_fields: pd.DataFrame,
     ax.set_axisbelow(True)
 
     # ticks every 5%
-    max_tick = np.ceil(share_max * 20) / 20.0
-    xticks = np.arange(0.0, max(0.05, max_tick) + 1e-9, 0.05)
+    max_tick = np.ceil(share_max * 10) / 10.0
+    xticks = np.arange(0.0, max(0.10, max_tick) + 1e-9, 0.10)
     xticks = xticks[xticks <= share_max + 1e-9]
     ax.set_xticks(xticks)
     ax.set_xlabel("% of unit publications", fontsize=11)
