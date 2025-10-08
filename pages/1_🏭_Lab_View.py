@@ -449,7 +449,15 @@ missing_cols = [c for c in col_map.values() if c not in df_units.columns]
 if missing_cols:
     st.error(f"Missing columns in ul_units_indicators.parquet for overview table: {missing_cols}")
 else:
-    summary = df_units[list(col_map.values())].copy()
+    labs_overview = df_units[df_units["Type"].astype(str).str.lower() == "lab"].copy()
+    summary = labs_overview[list(col_map.values())].copy()
+   
+    # sensible maxima for progress columns
+    max_share = float((summary["% Pubs (uni level)"] * 100.0).max() or 1.0)
+    max_lue   = float((summary["% Pubs LUE (lab level)"] * 100.0).max() or 1.0)
+    max_intl  = float((summary["% international"] * 100.0).max() or 1.0)
+    max_comp  = float((summary["% industrial"] * 100.0).max() or 1.0)
+
     summary = summary.rename(columns={
         "Unit Name": "Lab",
         "Pubs": "Publications",
@@ -461,33 +469,32 @@ else:
         "Avg FWCI (France)": "Avg FWCI (FR)",
         "See in OpenAlex": "OpenAlex",
     })
-    # Display-friendly %
+
+    # display-friendly %
     for pc in ["% UL pubs", "% LUE (lab)", "% international", "% industrial"]:
         summary[pc] = pd.to_numeric(summary[pc], errors="coerce") * 100.0
 
     summary = summary.sort_values("Publications", ascending=False)
 
-    # sensible maxima for progress columns
-    max_share = float(summary["% UL pubs"].max() or 1.0)
-    max_lue   = float(summary["% LUE (lab)"].max() or 1.0)
-    max_intl  = float(summary["% international"].max() or 1.0)
-    max_comp  = float(summary["% industrial"].max() or 1.0)
-
     st.dataframe(
         summary,
         use_container_width=True,
         hide_index=True,
+        column_order=[
+            "Lab", "Publications", "% UL pubs", "Pubs LUE", "% LUE (lab)",
+            "% international", "% industrial", "Avg FWCI (FR)", "OpenAlex", "ROR"  # ROR last
+        ],
         column_config={
             "Lab": st.column_config.TextColumn("Lab"),
             "Publications": st.column_config.NumberColumn("Publications", format="%.0f"),
-            "% UL pubs": st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
-            "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
-            "% LUE (lab)": st.column_config.ProgressColumn("% of pubs LUE", format="%.1f %%", min_value=0.0, max_value=max_lue),
-            "% international": st.column_config.ProgressColumn("% international", format="%.1f %%", min_value=0.0, max_value=max_intl),
-            "% industrial": st.column_config.ProgressColumn("% with company", format="%.1f %%", min_value=0.0, max_value=max_comp),
+            "% UL pubs":   st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
+            "Pubs LUE":    st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
+            "% LUE (lab)": st.column_config.ProgressColumn("% of pubs LUE",            format="%.1f %%", min_value=0.0, max_value=max_lue),
+            "% international": st.column_config.ProgressColumn("% international",      format="%.1f %%", min_value=0.0, max_value=max_intl),
+            "% industrial":    st.column_config.ProgressColumn("% with company",       format="%.1f %%", min_value=0.0, max_value=max_comp),
             "Avg FWCI (FR)": st.column_config.NumberColumn("Avg. FWCI (FR)", format="%.3f"),
             "OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
-            "ROR": st.column_config.TextColumn("ROR"),
+            "ROR":      st.column_config.TextColumn("ROR"),
         },
     )
 
@@ -686,13 +693,27 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         )
         if intl_df.empty:
             intl_df = pd.DataFrame(columns=["name","country","copubs","type","% UL copubs"])
-        # multiply % by 100 and rename
+
         intl_df["% of UL copubs with this partner"] = pd.to_numeric(intl_df.get("% UL copubs"), errors="coerce") * 100.0
         intl_df = intl_df.rename(columns={
             "name":"Partner","country":"Country","copubs":"Co-pubs","type":"Type"
-        })[["Partner","Country","Co-pubs","Type","% of UL copubs with this partner"]]
+        })[["Partner","Country","Co-pubs","% of UL copubs with this partner","Type"]]
         intl_df = pad_table_rows(intl_df, 10, numeric_cols=["Co-pubs","% of UL copubs with this partner"])
-        st.dataframe(intl_df, use_container_width=True, hide_index=True)
+
+        st.dataframe(
+            intl_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Partner": st.column_config.TextColumn("Partner"),
+                "Country": st.column_config.TextColumn("Country"),
+                "Co-pubs": st.column_config.NumberColumn("Co-pubs"),
+                "% of UL copubs with this partner": st.column_config.ProgressColumn(
+                    "% of UL copubs with this partner", format="%.1f %%", min_value=0.0, max_value=100.0
+                ),
+                "Type": st.column_config.TextColumn("Type"),
+            },
+        )
 
         st.markdown("---")
 
@@ -707,12 +728,27 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         )
         if fr_df.empty:
             fr_df = pd.DataFrame(columns=["name","type","copubs","% UL copubs"])
+
         fr_df["% of UL copubs with this partner"] = pd.to_numeric(fr_df.get("% UL copubs"), errors="coerce") * 100.0
-        fr_df = fr_df.rename(columns={
-            "name":"Partner","type":"Type","copubs":"Co-pubs"
-        })[["Partner","Co-pubs","Type","% of UL copubs with this partner"]]
+        fr_df = fr_df.rename(columns={"name":"Partner","type":"Type","copubs":"Co-pubs"})[
+            ["Partner","Co-pubs","% of UL copubs with this partner","Type"]
+        ]
         fr_df = pad_table_rows(fr_df, 10, numeric_cols=["Co-pubs","% of UL copubs with this partner"])
-        st.dataframe(fr_df, use_container_width=True, hide_index=True)
+
+        st.dataframe(
+            fr_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Partner": st.column_config.TextColumn("Partner"),
+                "Co-pubs": st.column_config.NumberColumn("Co-pubs"),
+                "% of UL copubs with this partner": st.column_config.ProgressColumn(
+                    "% of UL copubs with this partner", format="%.1f %%", min_value=0.0, max_value=100.0
+                ),
+                "Type": st.column_config.TextColumn("Type"),
+            },
+        )
+
 
         st.markdown("---")
 
@@ -755,7 +791,8 @@ else:
     else:
         # restrict period
         pubs = df_pubs.copy()
-        pubs = pubs[(pubs[col_year] >= YEAR_START) & (pubs[col_year] <= YEAR_END)]
+        pubs[col_year] = pd.to_numeric(pubs[col_year], errors="coerce")
+        pubs = pubs[pubs[col_year].between(YEAR_START, YEAR_END, inclusive="both")]
 
         # normalize labs ROR list
         def to_ror_list(x):
