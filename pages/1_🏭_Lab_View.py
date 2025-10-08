@@ -552,7 +552,7 @@ def plot_yearly_stacked_by_domain(df_yr_dom: pd.DataFrame,
 # ------------------------------ UI ------------------------------
 
 st.set_page_config(page_title="Lab view · Fields", layout="wide")
-st.title("🏭 Lab view — Field distribution (per lab)")
+st.title("🏭 Lab view - comparison & collaboration")
 
 look = get_lookups()
 df_units = load_units()
@@ -565,7 +565,6 @@ k1, k2, k3 = st.columns(3)
 k1.metric("Number of labs", "61")
 k2.metric("Total publications", "26 541")
 k3.metric("% covered by the labs", "73,03 %")
-st.caption("Values provided by user; no computation performed.")
 
 st.divider()
 
@@ -898,11 +897,11 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         st.markdown(f'<div class="legend-row">{legend_items}</div>', unsafe_allow_html=True)
 
         # --- NEW: Yearly stacked by domain (from precomputed blob) ---
-        st.markdown("#### Distribution per domain and per year")
+        st.markdown("#### Yearly distribution per domain")
 
         if not df_year_domain.empty:
             fig_years = plot_yearly_stacked_by_domain(
-                df_year_domain, look, "Yearly publications by domain", ymax=ymax_year
+                df_year_domain, look, " ", ymax=ymax_year
             )
             st.pyplot(fig_years, use_container_width=True)
         else:
@@ -918,19 +917,19 @@ def render_lab_panel(container, row: pd.Series, unit_name: str,
         render_subfield_wordcloud(df_sub," ")
 
         # --- Thematic distribution (fields) ---
-        st.markdown("#### Distribution per field (% of lab totals)")
+        st.markdown("#### Field distribution (% of unit) - total & LUE")
 
         fig_fields = plot_unit_fields_barh(
             df_fields, fields_union, share_max,
-            "Field distribution (% of unit) — total & LUE"
+            " "
         )
         st.pyplot(fig_fields, use_container_width=True)
 
         # --- FWCI whiskers (with counts gutter) ---
-        st.markdown("#### Distribution of FWCI values per field")
+        st.markdown("#### Field distribution of FWCI values (baseline = France)")
         fig_fwci = plot_fwci_whiskers(
             df_fwci, fields_union_fwci, xmax_fwci,
-            "FWCI (France) by field", show_counts_gutter=True
+            " ", show_counts_gutter=True
         )
         st.pyplot(fig_fwci, use_container_width=True)
 
