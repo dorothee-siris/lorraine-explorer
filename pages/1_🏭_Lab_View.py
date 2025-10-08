@@ -476,12 +476,17 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
 
     # axes & cosmetics
     ax.set_title(title, fontsize=12, pad=6)
-    ax.set_yticks(y)
-    ax.set_yticklabels(df["field_name"], fontsize=10)
 
     # consistent labels with counts on both sides
     counts_series = pd.Series(df.get("count")).fillna(0).astype(int)
-    labels = [f"{n} – {cnt}" for n, cnt in zip(df["field_name"], counts_series)]
+
+    def _strip_trailing_count(s: str) -> str:
+        # remove any trailing " – 12" or "- 12"
+        return re.sub(r"\s*[–-]\s*\d+\s*$", "", str(s))
+
+    base_names = [_strip_trailing_count(n) for n in df["field_name"]]
+    labels = [f"{n} – {cnt}" for n, cnt in zip(base_names, counts_series)]
+
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=10)
 
