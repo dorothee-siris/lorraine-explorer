@@ -1,748 +1,838 @@
-# pages/2_🔬_Topic_View.py
-# Streamlit "Topic View" — two perspectives: Domains and Fields
-# - Reads:
-#     data/ul_domains_indicators.parquet
-#     data/ul_fields_indicators.parquet
-# - Self-contained: no app-level dependencies beyond Streamlit, pandas, numpy, altair
-# - Visuals:
-#     * Overview tables with progress bars
-#     * FWCI whisker charts (min–Q1–median–Q3–max)
-#     * Drilldowns: labs, partners, authors, distributions (fields/subfields)
-# - Optional: upload alternative parquet files or a benchmark file to compare shares
-
+# pages/2_🔬_Thematic_View.py
 from __future__ import annotations
 
+import sys
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import altair as alt
 
-
-# -----------------------------------------------------------------------------
-# Page config
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="🔬 Topic View — Domains & Fields",
-    page_icon="🔬",
-    layout="wide",
-)
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def load_parquet(path_or_buffer):
-    try:
-        return pd.read_parquet(path_or_buffer)
-    except Exception as e:
-        st.error(f"Could not read parquet: {e}")
-        return pd.DataFrame()
-
-
-def _ensure_fraction(series: pd.Series) -> pd.Series:
-    """Ensure percentage-looking columns are fractions in [0,1].
-    Accepts values already in [0,1] or [0,100]."""
-    s = pd.to_numeric(series, errors="coerce")
-    if s.dropna().max() is not None and s.dropna().max() > 1.000001:
-        s = s / 100.0
-    return s
-
-
-def _pipe_split(cell: object) -> List[str]:
-    """Split 'a|b|c' -> list[str]; robust to NaN/None."""
-    if cell is None or (isinstance(cell, float) and np.isnan(cell)):
-        return []
-    text = str(cell).strip()
-    if not text:
-        return []
-    return [p.strip() for p in text.split("|") if p.strip()]
-
-
-def _pipe_to_numeric(cell: object, dtype=float) -> List:
-    return [dtype(x) if str(x).strip() else np.nan for x in _pipe_split(cell)]
-
-
-_kv_re = re.compile(r"^(?P<key>.+?)\s*\(\s*(?P<val>-?\d+(?:\.\d+)?)\s*\)\s*$")
-
-
-def parse_kv_list(cell: object) -> List[Tuple[str, float]]:
-    """
-    Parse 'key(value) | key2(value2)' into list[(key, value)].
-    Works for counts or percentages (values are floats).
-    """
-    items = []
-    for part in _pipe_split(cell):
-        m = _kv_re.match(part)
-        if m:
-            key = m.group("key").strip()
-            val = float(m.group("val"))
-            # If the value is an integer (like counts), cast to int for display niceness
-            if abs(val - int(val)) < 1e-9:
-                val = int(val)
-            items.append((key, val))
-    return items
-
-
-def kv_to_df(cell: object, key_name="Key", value_name="Value") -> pd.DataFrame:
-    pairs = parse_kv_list(cell)
-    if not pairs:
-        return pd.DataFrame(columns=[key_name, value_name])
-    return pd.DataFrame(pairs, columns=[key_name, value_name])
-
-
-def _progress_cols_to_config(percent_cols: Iterable[str]) -> Dict[str, st.column_config.ProgressColumn]:
-    cfg = {}
-    for c in percent_cols:
-        cfg[c] = st.column_config.ProgressColumn(
-            c,
-            help="Percentage",
-            format="%.1f%%",
-            min_value=0.0,
-            max_value=1.0,
-        )
-    return cfg
-
-
-def _number_cols_to_config(cols: Iterable[str], fmt="%.0f") -> Dict[str, st.column_config.NumberColumn]:
-    cfg = {}
-    for c in cols:
-        cfg[c] = st.column_config.NumberColumn(c, format=fmt)
-    return cfg
-
-
-def whisker_chart(
-    df_stats: pd.DataFrame,
-    label_col: str,
-    min_col: str,
-    q1_col: str,
-    med_col: str,
-    q3_col: str,
-    max_col: str,
-    title: str,
-    log_scale: bool = False,
-    height: int = 28,
-):
-    """
-    Build a horizontal min–Q1–median–Q3–max whisker using Altair.
-    df_stats: rows per entity (e.g., domain or lab)
-    """
-    if df_stats.empty:
-        return alt.LayerChart()
-
-    scale = alt.Scale(type="log") if log_scale else alt.Scale(type="linear", nice=True)
-
-    base = alt.Chart(df_stats).transform_calculate(
-        label=f"datum['{label_col}']"
-    )
-
-    rule = base.mark_rule().encode(
-        y=alt.Y(f"{label_col}:N", sort='-x', title=None),
-        x=alt.X(f"{min_col}:Q", scale=scale, title="FWCI (France)"),
-        x2=f"{max_col}:Q",
-        tooltip=[
-            alt.Tooltip(f"{label_col}:N", title="Name"),
-            alt.Tooltip(f"{min_col}:Q", title="Min", format=".2f"),
-            alt.Tooltip(f"{q1_col}:Q", title="Q1", format=".2f"),
-            alt.Tooltip(f"{med_col}:Q", title="Median", format=".2f"),
-            alt.Tooltip(f"{q3_col}:Q", title="Q3", format=".2f"),
-            alt.Tooltip(f"{max_col}:Q", title="Max", format=".2f"),
-        ],
-    )
-
-    box = base.mark_bar(height=height).encode(
-        y=alt.Y(f"{label_col}:N", sort='-x', title=None),
-        x=alt.X(f"{q1_col}:Q", scale=scale, title="FWCI (France)"),
-        x2=f"{q3_col}:Q",
-    )
-
-    median_tick = base.mark_tick(thickness=2, size=18).encode(
-        y=alt.Y(f"{label_col}:N", sort='-x', title=None),
-        x=alt.X(f"{med_col}:Q", scale=scale, title="FWCI (France)"),
-    )
-
-    chart = (rule + box + median_tick).properties(
-        title=title, height=max(240, height * (len(df_stats) + 2))
-    )
-    return chart
-
-
-def _download_button(df: pd.DataFrame, label: str, file_name: str):
-    st.download_button(
-        label=label,
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=file_name,
-        mime="text/csv",
-        use_container_width=True,
-        type="secondary",
-    )
-
-
-def _maybe_fractionize(df: pd.DataFrame, percent_cols: List[str]) -> pd.DataFrame:
-    for c in percent_cols:
-        if c in df.columns:
-            df[c] = _ensure_fraction(df[c])
-    return df
-
-
-def _topn(df: pd.DataFrame, n: int = 20) -> pd.DataFrame:
-    if df.empty:
-        return df
-    return df.head(n).copy()
-
-
-# -----------------------------------------------------------------------------
-# Data inputs (defaults + optional uploads)
-# -----------------------------------------------------------------------------
-st.sidebar.subheader("📥 Data")
-default_domains_path = Path("data/ul_domains_indicators.parquet")
-default_fields_path = Path("data/ul_fields_indicators.parquet")
-
-domains_file = st.sidebar.file_uploader("ul_domains_indicators.parquet", type=["parquet"], key="domains_upload")
-fields_file = st.sidebar.file_uploader("ul_fields_indicators.parquet", type=["parquet"], key="fields_upload")
-benchmark_file = st.sidebar.file_uploader("Optional benchmark file (same schema) to compare shares", type=["parquet"], key="benchmark_upload")
-
-df_domains = load_parquet(domains_file if domains_file else default_domains_path)
-df_fields = load_parquet(fields_file if fields_file else default_fields_path)
-df_benchmark = load_parquet(benchmark_file) if benchmark_file else pd.DataFrame()
-
-if df_domains.empty and df_fields.empty:
-    st.warning("No data loaded. Place parquet files in `data/` or upload them from the sidebar.")
+# plotting
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+except ModuleNotFoundError:
+    st.error("matplotlib is not installed. Add it to requirements.txt or `pip install matplotlib`.")
     st.stop()
 
-# Normalize percentage columns to fractions [0,1]
-DOMAIN_PERCENT_COLS = [
-    "% Pubs (uni level)",
-    "% Pubs LUE (domain level)",
-    "% Pubs LUE (uni level)",
-    "% PPtop10% (domain level)",
-    "% PPtop10% (uni level)",
-    "% PPtop1% (domain level)",
-    "% PPtop1% (uni level)",
-    "% internal collaboration",
-    "% international",
-    "% industrial",
-]
-FIELD_PERCENT_COLS = [
-    "% Pubs (uni level)",
-    "% Pubs LUE (field level)",
-    "% Pubs LUE (uni level)",
-    "% PPtop10% (field level)",
-    "% PPtop10% (uni level)",
-    "% PPtop1% (field level)",
-    "% PPtop1% (uni level)",
-    "% internal collaboration",
-    "% international",
-    "% industrial",
-]
-df_domains = _maybe_fractionize(df_domains, DOMAIN_PERCENT_COLS)
-df_fields = _maybe_fractionize(df_fields, FIELD_PERCENT_COLS)
-if not df_benchmark.empty:
-    # Try to align expected distribution columns for benchmark comparisons
-    for cols in (DOMAIN_PERCENT_COLS, FIELD_PERCENT_COLS):
-        df_benchmark = _maybe_fractionize(df_benchmark, cols)
+# Make lib/taxonomy.py importable
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(REPO_ROOT / "lib"))
 
-
-# -----------------------------------------------------------------------------
-# Header
-# -----------------------------------------------------------------------------
-st.title("🔬 Topic View")
-st.caption(
-    "Explain **Domains** and **Fields** through labs' contribution, citation impact (FWCI, top10%, top1%), and collaboration (internal / international / industrial)."
+from lib.taxonomy import (
+    build_taxonomy_lookups,
+    canonical_field_order,
+    get_domain_color,
+    get_field_color,
+    get_subfield_color,
 )
 
-tab_domains, tab_fields = st.tabs(["🧭 Domains", "🧩 Fields"])
+# ============================== constants ==============================
 
-# -----------------------------------------------------------------------------
-# TAB 1: DOMAINS
-# -----------------------------------------------------------------------------
-with tab_domains:
-    st.subheader("Domain Overview")
+YEAR_START, YEAR_END = 2019, 2023
 
-    # Filters
-    colA, colB, colC = st.columns([1.5, 1, 1])
-    domain_search = colA.text_input("Search domain name", placeholder="e.g., Physical Sciences")
-    sort_by = colB.selectbox(
-        "Sort by",
-        ["Pubs", "Avg FWCI (France)", "% PPtop10% (domain level)", "% PPtop1% (domain level)"],
-        index=0,
+DOMAINS_PATH = REPO_ROOT / "data" / "ul_domains_indicators.parquet"
+FIELDS_PATH  = REPO_ROOT / "data" / "ul_fields_indicators.parquet"
+PUBS_PATH    = REPO_ROOT / "data" / "pubs_final.parquet"   # optional
+UNITS_PATH   = REPO_ROOT / "data" / "ul_units_indicators.parquet"  # optional (for ROR -> lab name)
+
+FIELD_PAIR_RE = re.compile(r"^\s*(.*?)\s*\(([^)]*)\)\s*$")
+
+# ============================== page config ==============================
+
+st.set_page_config(page_title="🔬 Thematic view · Domains", layout="wide")
+st.title("🔬 Thematic view — Domains")
+
+# ============================== caching & loaders ==============================
+
+@st.cache_data(show_spinner=False)
+def get_lookups() -> Dict:
+    return build_taxonomy_lookups()
+
+@st.cache_data(show_spinner=False)
+def load_domains() -> pd.DataFrame:
+    df = pd.read_parquet(DOMAINS_PATH)
+    # normalize simple casing/spacing
+    df = df.rename(columns={c: c.strip() for c in df.columns})
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_fields() -> pd.DataFrame:
+    df = pd.read_parquet(FIELDS_PATH)
+    df = df.rename(columns={c: c.strip() for c in df.columns})
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_pubs() -> Optional[pd.DataFrame]:
+    try:
+        df = pd.read_parquet(PUBS_PATH)
+        return df
+    except Exception:
+        return None
+
+@st.cache_data(show_spinner=False)
+def load_units_optional() -> Optional[pd.DataFrame]:
+    try:
+        df = pd.read_parquet(UNITS_PATH)
+        df = df.rename(columns={c: c.strip() for c in df.columns})
+        return df
+    except Exception:
+        return None
+
+look = get_lookups()
+df_domains = load_domains()
+df_fields  = load_fields()
+df_pubs    = load_pubs()          # not strictly required here
+df_units   = load_units_optional() # optional: used for ROR->lab name
+
+# ============================== tiny utils ==============================
+
+def _to_int_safe(s) -> int:
+    try:
+        m = re.match(r"^\s*([0-9]+)", str(s))
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+def _to_float_safe(s) -> float:
+    try:
+        return float(str(s).replace(",", "."))
+    except Exception:
+        return np.nan
+
+def darken_hex(hex_color: str, factor: float = 0.65) -> str:
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join([c*2 for c in h])
+    r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+    r, g, b = int(r*factor), int(g*factor), int(b*factor)
+    r, g, b = max(0,r), max(0,g), max(0,b)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def parse_pipe_number_list(blob: str) -> List[int]:
+    if pd.isna(blob) or not str(blob).strip():
+        return []
+    return [_to_int_safe(x) for x in str(blob).split("|")]
+
+def parse_id_count_blob(blob: str) -> pd.DataFrame:
+    """'id_or_name (count) | id (count)' -> DataFrame[id,count]"""
+    if pd.isna(blob) or not str(blob).strip():
+        return pd.DataFrame(columns=["id","count"])
+    rows = []
+    for p in str(blob).split("|"):
+        m = FIELD_PAIR_RE.match(p.strip())
+        if not m:
+            continue
+        tok = m.group(1).strip()
+        cnt = _to_int_safe(m.group(2))
+        rows.append((tok, cnt))
+    df = pd.DataFrame(rows, columns=["id","count"])
+    # aggregate if duplicates
+    return df.groupby("id", as_index=False)["count"].sum().sort_values("count", ascending=False)
+
+def parse_id_value_blob(blob: str) -> pd.DataFrame:
+    """'id_or_name (value) | id (value)' -> DataFrame[id,value(float)]"""
+    if pd.isna(blob) or not str(blob).strip():
+        return pd.DataFrame(columns=["id","value"])
+    rows = []
+    for p in str(blob).split("|"):
+        m = FIELD_PAIR_RE.match(p.strip())
+        if not m:
+            continue
+        tok = m.group(1).strip()
+        val = _to_float_safe(m.group(2))
+        rows.append((tok, val))
+    return pd.DataFrame(rows, columns=["id","value"])
+
+def parse_parallel_lists(names_blob: str, *more_blobs: str) -> pd.DataFrame:
+    def split_clean(s: str) -> List[str]:
+        if pd.isna(s) or not str(s).strip():
+            return []
+        return [x.strip() for x in str(s).split("|")]
+    cols = [split_clean(names_blob)]
+    for b in more_blobs:
+        cols.append(split_clean(b))
+    n = max((len(c) for c in cols), default=0)
+    cols = [c + [""]*(n-len(c)) for c in cols]
+    df = pd.DataFrame({"name": cols[0]})
+    if len(cols) > 1: df["type"] = cols[1]
+    if len(cols) > 2: df["country"] = cols[2]
+    if len(cols) > 3: df["count"] = [ _to_int_safe(x) for x in cols[3] ]
+    if len(cols) > 4: df["pct_ul"] = [ _to_float_safe(x) for x in cols[4] ]
+    return df
+
+def pad_table_rows(df: pd.DataFrame, n_rows: int, numeric_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    d = df.copy()
+    if len(d) >= n_rows:
+        return d.head(n_rows)
+    missing = n_rows - len(d)
+    filler = {}
+    for col in d.columns:
+        if numeric_cols and col in numeric_cols:
+            filler[col] = np.nan
+        else:
+            filler[col] = ""
+    filler_df = pd.DataFrame([filler] * missing)
+    return pd.concat([d, filler_df], ignore_index=True)
+
+def ror_to_lab_name_map() -> Dict[str,str]:
+    if df_units is None:
+        return {}
+    cols = {"ROR","Unit Name"}
+    if not cols.issubset(df_units.columns):
+        return {}
+    ref = df_units[["ROR","Unit Name"]].drop_duplicates()
+    return dict(zip(ref["ROR"].astype(str), ref["Unit Name"].astype(str)))
+
+# ============================== plotting (Matplotlib, Lab View style) ==============================
+
+def plot_year_counts_bar(values: List[int], title: str, ymax: int | None = None) -> plt.Figure:
+    years = [YEAR_START + i for i in range(len(values))]
+    fig, ax = plt.subplots(figsize=(3.6, 2.6))
+    ax.bar(years, values, width=0.6, color="#8190FF", edgecolor="none", alpha=0.9)
+    ax.set_title(title, fontsize=12, pad=6)
+    ax.set_xticks(years)
+    ax.set_xticklabels([str(y) for y in years], fontsize=10)
+    ax.set_ylabel("Publications", fontsize=11)
+    if ymax is not None and ymax > 0:
+        ax.set_ylim(0, ymax * 1.05)
+    ax.grid(axis="y", color="#eeeeee")
+    for spine in ("top","right"):
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+    return fig
+
+def plot_barh_with_gutter(df: pd.DataFrame,
+                          order_labels: List[str],
+                          value_col: str,
+                          count_col: Optional[str],
+                          title: str,
+                          color_col: Optional[str] = None,
+                          base_color: Optional[str] = None,
+                          overlay_value_col: Optional[str] = None,
+                          overlay_darkening: float = 0.65,
+                          x_label: str = "% of domain publications",
+                          share_max: Optional[float] = None,
+                          bar_height: float = 0.8) -> plt.Figure:
+    """
+    Generic left-gutter barh with optional overlay (e.g., LUE share).
+    Expects df to have columns: Label, value_col, (optional) count_col, (optional) color_col
+    """
+    base = pd.DataFrame({"Label": order_labels})
+    d = base.merge(df, on="Label", how="left")
+
+    # defaults
+    if count_col and count_col not in d.columns:
+        d[count_col] = 0
+    if value_col not in d.columns:
+        d[value_col] = 0.0
+    if overlay_value_col and overlay_value_col not in d.columns:
+        d[overlay_value_col] = 0.0
+
+    if color_col and color_col in d.columns:
+        colors = d[color_col].fillna("#7f7f7f").tolist()
+    else:
+        colors = [base_color or "#7f7f7f"] * len(d)
+
+    y = np.arange(len(d))
+    vmax = float(share_max if share_max is not None else max(0.05, float(d[value_col].max() or 0.0)))
+    fig_h = max(1.0, 0.42 * len(d) + 0.8)
+    fig, ax = plt.subplots(figsize=(7.2, fig_h))
+
+    # left gutter
+    left_pad_px, offset_px = (72, 6)
+    ax.set_xlim(0, vmax)
+    fig.canvas.draw()
+    bb = ax.get_window_extent(renderer=fig.canvas.get_renderer())
+    ax_width_px = bb.width if bb.width > 0 else 600
+    data_per_px = (vmax - 0.0) / ax_width_px if ax_width_px else 0.0001
+    left_pad_data = left_pad_px * data_per_px
+    offset_data   = offset_px * data_per_px
+    ax.set_xlim(-left_pad_data, vmax)
+
+    # bars
+    for i, row in d.iterrows():
+        ax.barh(y[i], width=float(row[value_col] or 0.0), left=0.0, height=bar_height,
+                edgecolor="none", color=colors[i], alpha=0.95, zorder=2)
+        if overlay_value_col:
+            ov = float(row[overlay_value_col] or 0.0)
+            if ov > 0:
+                ax.barh(y[i], width=ov, left=0.0, height=bar_height*0.7,
+                        edgecolor="none", color=darken_hex(colors[i], overlay_darkening), alpha=1.0, zorder=3)
+
+    # gutter counts
+    if count_col:
+        for yi, cnt in enumerate(pd.to_numeric(d[count_col], errors="coerce").fillna(0).astype(int).tolist()):
+            ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
+                    va="center", ha="left", fontsize=9, color="#444")
+
+    # axes
+    ax.set_title(title, fontsize=12, pad=6)
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["Label"], fontsize=10)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#eeeeee")
+    ax.set_axisbelow(True)
+
+    # xticks every 5%
+    max_tick = np.ceil(vmax * 20) / 20.0
+    xticks = np.arange(0.0, max(0.05, max_tick) + 1e-9, 0.05)
+    xticks = xticks[xticks <= vmax + 1e-9]
+    ax.set_xticks(xticks)
+    ax.set_xlabel(x_label, fontsize=11)
+    ax.set_xlim(-left_pad_data, vmax)
+    ax.set_xticklabels([f"{int(x*100)}%" for x in xticks], fontsize=10)
+
+    for spine in ("top","right","left"):
+        ax.spines[spine].set_visible(False)
+
+    plt.tight_layout()
+    return fig
+
+def plot_fwci_whiskers(df: pd.DataFrame,
+                       order_labels: List[str],
+                       qcols: Dict[str,str],  # keys among {'min','p5','q1','q2','q3','p95','max'}
+                       xmax: float,
+                       title: str,
+                       count_col: Optional[str] = None) -> plt.Figure:
+    base = pd.DataFrame({"Label": order_labels})
+    d = base.merge(df, on="Label", how="left")
+
+    y = np.arange(len(d))
+    fig_h = max(1.0, 0.40 * len(d) + 0.8)
+    fig, ax = plt.subplots(figsize=(7.2, fig_h))
+
+    # left gutter
+    left_pad_px, offset_px = (72, 6)
+    ax.set_xlim(0, xmax)
+    fig.canvas.draw()
+    bb = ax.get_window_extent(renderer=fig.canvas.get_renderer())
+    ax_width_px = bb.width if bb.width > 0 else 600
+    data_per_px = (xmax - 0.0) / ax_width_px if ax_width_px else 0.0001
+    left_pad_data = left_pad_px * data_per_px
+    offset_data   = offset_px * data_per_px
+    ax.set_xlim(-left_pad_data, xmax)
+
+    # draw rows
+    for i, r in d.iterrows():
+        c = r.get("color", "#7f7f7f")
+        # whisker span
+        x_min = r.get(qcols.get("min","min"))
+        x_max = r.get(qcols.get("max","max"))
+        # Allow p5/p95 when min/max are absent
+        x_min = x_min if pd.notna(x_min) else r.get(qcols.get("p5","p5"))
+        x_max = x_max if pd.notna(x_max) else r.get(qcols.get("p95","p95"))
+
+        q1 = r.get(qcols.get("q1","q1"))
+        q2 = r.get(qcols.get("q2","q2"))
+        q3 = r.get(qcols.get("q3","q3"))
+
+        stats = [x for x in [x_min,q1,q2,q3,x_max] if pd.notna(x)]
+        if len(stats) == 0:
+            continue
+
+        if pd.notna(x_min) and pd.notna(x_max):
+            ax.hlines(y[i], xmin=float(x_min), xmax=float(x_max), color=c, linewidth=1.2, zorder=2)
+        if pd.notna(q1) and pd.notna(q3) and float(q3) >= float(q1):
+            ax.barh(y[i], width=float(q3)-float(q1), left=float(q1), height=0.5,
+                    color=c, alpha=0.25, edgecolor="none", zorder=3)
+        if pd.notna(q2):
+            ax.vlines(float(q2), ymin=y[i]-0.25, ymax=y[i]+0.25, color=c, linewidth=2.0, zorder=4)
+
+    # gutter counts
+    if count_col and count_col in d.columns:
+        for yi, cnt in enumerate(pd.to_numeric(d[count_col], errors="coerce").fillna(0).astype(int).tolist()):
+            if cnt > 0:
+                ax.text(-left_pad_data + offset_data, yi, f"{cnt:,}".replace(",", " "),
+                        va="center", ha="left", fontsize=9, color="#444")
+
+    # axes
+    ax.set_title(title, fontsize=12, pad=6)
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["Label"], fontsize=10)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#eeeeee")
+    ax.set_axisbelow(True)
+    ax.set_xlabel("FWCI (France)", fontsize=11)
+    for spine in ("top","right","left"):
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+    return fig
+
+# ============================== domain overview table ==============================
+
+st.subheader("Domain overview (2019–2023)")
+
+# Prepare overview table
+def pct_to_100(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce") * 100.0
+
+overview = pd.DataFrame({
+    "Domain": df_domains.get("Domain name", pd.Series([""]*len(df_domains))),
+    "Publications": pd.to_numeric(df_domains.get("Pubs"), errors="coerce"),
+    "% UL pubs": pct_to_100(df_domains.get("% Pubs (uni level)", 0)),
+    "Pubs LUE": pd.to_numeric(df_domains.get("Pubs LUE"), errors="coerce"),
+    "% LUE (domain)": pct_to_100(df_domains.get("% Pubs LUE (domain level)", 0)),
+    "% Top 10% (domain)": pct_to_100(df_domains.get("% PPtop10% (domain level)", 0)),
+    "% Top 1% (domain)": pct_to_100(df_domains.get("% PPtop1% (domain level)", 0)),
+    "% internal": pct_to_100(df_domains.get("% internal collaboration", 0)),
+    "% international": pct_to_100(df_domains.get("% international", 0)),
+    "Avg FWCI (FR)": pd.to_numeric(df_domains.get("Avg FWCI (France)"), errors="coerce"),
+    "OpenAlex": df_domains.get("See in OpenAlex", ""),
+})
+
+# Canonical order of domains
+present = overview["Domain"].astype(str).tolist()
+order = [d for d in look.get("domain_order", []) if d in present]
+if order:
+    cat = pd.Categorical(overview["Domain"], categories=order, ordered=True)
+    overview = overview.sort_values("Domain", key=lambda s: cat)
+
+# progress maxes
+max_ul   = float(overview["% UL pubs"].max() or 1.0)
+max_lue  = float(overview["% LUE (domain)"].max() or 1.0)
+max_t10  = float(overview["% Top 10% (domain)"].max() or 1.0)
+max_t1   = float(overview["% Top 1% (domain)"].max() or 1.0)
+max_int  = float(overview["% international"].max() or 1.0)
+max_intl = float(overview["% internal"].max() or 1.0)
+
+st.dataframe(
+    overview,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Domain": st.column_config.TextColumn("Domain"),
+        "Publications": st.column_config.NumberColumn("Publications", format="%.0f"),
+        "% UL pubs": st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_ul),
+        "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
+        "% LUE (domain)": st.column_config.ProgressColumn("% of domain pubs LUE", format="%.1f %%", min_value=0.0, max_value=max_lue),
+        "% Top 10% (domain)": st.column_config.ProgressColumn("% Top 10% (domain)", format="%.1f %%", min_value=0.0, max_value=max_t10),
+        "% Top 1% (domain)": st.column_config.ProgressColumn("% Top 1% (domain)", format="%.1f %%", min_value=0.0, max_value=max_t1),
+        "% internal": st.column_config.ProgressColumn("% internal", format="%.1f %%", min_value=0.0, max_value=max_intl),
+        "% international": st.column_config.ProgressColumn("% international", format="%.1f %%", min_value=0.0, max_value=max_int),
+        "Avg FWCI (FR)": st.column_config.NumberColumn("Avg FWCI (FR)", format="%.3f"),
+        "OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
+    },
+)
+
+st.divider()
+
+# ============================== drill-down by domain ==============================
+
+st.subheader("Drill-down by domain")
+domains_list = overview["Domain"].dropna().astype(str).tolist()
+if not domains_list:
+    st.info("No domains found in ul_domains_indicators.parquet.")
+    st.stop()
+
+sel_domain = st.selectbox("Pick a domain", options=domains_list, index=0)
+drow = df_domains.loc[df_domains["Domain name"] == sel_domain]
+if drow.empty:
+    st.warning("Selected domain not found in the domain indicators file.")
+    st.stop()
+drow = drow.iloc[0]
+
+# --- KPIs row
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Pubs (2019–2023)", f"{_to_int_safe(drow.get('Pubs')):,}".replace(",", " "))
+k2.metric("… incl. LUE", f"{_to_int_safe(drow.get('Pubs LUE')):,}".replace(",", " "))
+k3.metric("… Top 10% (count)", f"{_to_int_safe(drow.get('PPtop10%')):,}".replace(",", " "))
+k4.metric("… Top 1% (count)", f"{_to_int_safe(drow.get('PPtop1%')):,}".replace(",", " "))
+
+# --- Yearly distribution
+year_counts = parse_pipe_number_list(drow.get("Year distribution (2019-2023)", ""))
+if year_counts:
+    fig_years = plot_year_counts_bar(year_counts, "Yearly publications (totals)")
+    st.pyplot(fig_years, use_container_width=True)
+else:
+    st.info("No yearly distribution data for this domain.")
+
+st.markdown("---")
+
+# ------------------------ Labs contribution + FWCI ------------------------
+
+st.markdown("#### Labs contribution and impact")
+
+# Labs share/counts
+labs_cnt = parse_id_count_blob(drow.get("By lab: count", ""))
+labs_shr = parse_id_value_blob(drow.get("By lab: % of domain pubs", ""))
+
+labs = pd.merge(labs_cnt, labs_shr, on="id", how="outer").fillna({"count":0, "value":0.0})
+labs["share"] = pd.to_numeric(labs["value"], errors="coerce").fillna(0.0)  # 0..1
+labs = labs.drop(columns=["value"])
+
+# Optional: map ROR -> lab name
+name_map = ror_to_lab_name_map()
+labs["Label"] = labs["id"].astype(str).map(name_map).fillna(labs["id"].astype(str))
+
+# Filter: show labs >= 2% (adjustable)
+min_share = st.slider("Show labs with share ≥", 0.0, 10.0, 2.0, 0.5, help="% of domain publications")
+labs = labs[labs["share"]*100.0 >= min_share].copy()
+
+# order & colors
+labs = labs.sort_values("share", ascending=False).reset_index(drop=True)
+lab_labels = labs["Label"].tolist()
+dom_color = get_domain_color(sel_domain)
+labs["color"] = dom_color
+
+# paired charts
+share_max = float(max(labs["share"].max() if not labs.empty else 0.0, 0.05))
+left_fig = plot_barh_with_gutter(
+    df=labs.assign(**{"%share": labs["share"]}),   # keep share in 0..1
+    order_labels=lab_labels,
+    value_col="%share",
+    count_col="count",
+    title="% of domain publications (lab)",
+    color_col="color",
+    x_label="% of domain publications",
+    share_max=share_max,
+)
+
+# FWCI whiskers per lab (percentiles provided at domain level)
+q_needed = ["By lab: FWCI_FR p5", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR p95"]
+have_all_q = all(c in df_domains.columns for c in q_needed)
+right_fig = None
+if have_all_q and not labs.empty:
+    # Build qdf aligned to labs by their id token
+    def _lab_q(col: str) -> pd.Series:
+        s = parse_id_value_blob(drow.get(col, "")).set_index("id")["value"]
+        return s
+
+    qdf = pd.DataFrame({
+        "id": labs["id"].astype(str),
+        "Label": labs["Label"].astype(str),
+        "p5":  _lab_q("By lab: FWCI_FR p5").reindex(labs["id"].astype(str)).values,
+        "q1":  _lab_q("By lab: FWCI_FR Q1").reindex(labs["id"].astype(str)).values,
+        "q2":  _lab_q("By lab: FWCI_FR Q2").reindex(labs["id"].astype(str)).values,
+        "q3":  _lab_q("By lab: FWCI_FR Q3").reindex(labs["id"].astype(str)).values,
+        "p95": _lab_q("By lab: FWCI_FR p95").reindex(labs["id"].astype(str)).values,
+        "color": dom_color,
+        "count": labs["count"].values,
+    })
+    xmax = float(np.nanmax(qdf[["p95","q3","q2","q1"]].values)) if not qdf.empty else 1.0
+    xmax = max(1.0, xmax)
+    right_fig = plot_fwci_whiskers(
+        df=qdf,
+        order_labels=lab_labels,
+        qcols={"p5":"p5","q1":"q1","q2":"q2","q3":"q3","p95":"p95"},
+        xmax=xmax,
+        title="FWCI (France) by lab",
+        count_col="count",
     )
-    ascending = colC.toggle("Ascending sort", value=False)
 
-    dfD = df_domains.copy()
-    if domain_search:
-        dfD = dfD[dfD["Domain name"].str.contains(domain_search, case=False, na=False)]
+# render side-by-side
+cA, cB = st.columns(2)
+with cA:
+    st.pyplot(left_fig, use_container_width=True)
+with cB:
+    if right_fig is not None:
+        st.pyplot(right_fig, use_container_width=True)
+    else:
+        st.info("FWCI percentiles per lab not available in this file.")
 
-    dfD = dfD.sort_values(sort_by, ascending=ascending)
+st.markdown("---")
 
-    # Render table with progress bars
-    domain_overview_cols = [
-        "Domain name",
-        "Pubs",
-        "% Pubs (uni level)",
-        "Pubs LUE",
-        "% Pubs LUE (domain level)",
-        "% Pubs LUE (uni level)",
-        "PPtop10%",
-        "% PPtop10% (domain level)",
-        "% PPtop10% (uni level)",
-        "PPtop1%",
-        "% PPtop1% (domain level)",
-        "% PPtop1% (uni level)",
-        "Avg FWCI (France)",
-        "FWCI_FR min",
-        "FWCI_FR Q1",
-        "FWCI_FR Q2",
-        "FWCI_FR Q3",
-        "FWCI_FR max",
-        "% internal collaboration",
-        "% international",
-        "% industrial",
-    ]
-    present_cols = [c for c in domain_overview_cols if c in dfD.columns]
+# ------------------------ Field composition inside domain ------------------------
+
+st.markdown("#### Thematic shape — fields within this domain")
+
+fld_cnt = parse_id_count_blob(drow.get("By field: count", ""))
+fld_lue = parse_id_count_blob(drow.get("By field: LUE count", ""))
+fld_pct = parse_id_value_blob(drow.get("By field: % of domain pubs", ""))
+
+# Merge & derive
+fields_df = pd.merge(fld_cnt, fld_lue, on="id", how="outer", suffixes=("_count","_lue")).merge(
+    fld_pct, on="id", how="outer"
+).fillna({"count_count":0, "count_lue":0, "value":0.0})
+
+# id can be numeric id or name; resolve to name via taxonomy when possible
+def field_token_to_name(tok: str) -> str:
+    t = str(tok).strip()
+    if t.isdigit():
+        # try exact id->name
+        return look["id2name"].get(t, t)
+    # already a name
+    return t
+
+fields_df["Field"] = fields_df["id"].astype(str).apply(field_token_to_name)
+fields_df["Label"] = fields_df["Field"]
+fields_df["share"] = pd.to_numeric(fields_df["value"], errors="coerce").fillna(0.0)  # 0..1
+fields_df["lue_share"] = (pd.to_numeric(fields_df["count_lue"], errors="coerce").fillna(0).astype(float) /
+                          pd.to_numeric(drow.get("Pubs", 0), errors="coerce").clip(lower=1).astype(float))
+# color by domain (all fields belong to sel_domain); but we keep field-specific color for consistency
+fields_df["color"] = fields_df["Field"].apply(get_field_color)
+
+# Canonical order restricted to fields present in this domain per taxonomy
+canon_fields_for_domain = [f for f in look["fields_by_domain"].get(sel_domain, []) if f in fields_df["Field"].tolist()]
+if not canon_fields_for_domain:
+    # fallback: keep rows we have
+    canon_fields_for_domain = fields_df["Field"].tolist()
+
+share_max_fields = float(max(fields_df["share"].max() if not fields_df.empty else 0.0, 0.05))
+fig_fields = plot_barh_with_gutter(
+    df=fields_df.rename(columns={"count_count":"count"})[["Label","share","lue_share","count","color"]],
+    order_labels=canon_fields_for_domain,
+    value_col="share",
+    count_col="count",
+    title="% of domain publications by field (LUE overlay in darker tint)",
+    color_col="color",
+    overlay_value_col="lue_share",
+    x_label="% of domain publications",
+    share_max=share_max_fields,
+)
+st.pyplot(fig_fields, use_container_width=True)
+
+st.markdown("---")
+
+# ------------------------ Partners in this domain ------------------------
+
+st.markdown("#### Top partners in this domain")
+
+# FR partners
+st.markdown("**Top 20 French partners**")
+fr_df = parse_parallel_lists(
+    drow.get("Top 20 FR partners (name)", ""),
+    drow.get("Top 20 FR partners (type)", ""),
+    "",  # no country column
+    drow.get("Top 20 FR partners (totals copubs in this domain)", ""),
+    drow.get("Top 20 FR partners (% of UL total copubs)", ""),
+)
+if fr_df.empty:
+    st.info("No French partners listed for this domain.")
+else:
+    fr_df = fr_df.rename(columns={
+        "name":"Partner", "type":"Type", "count":"Co-pubs in this domain", "pct_ul":"Share of UL–partner copubs (this domain)"
+    })
+    fr_df["Share of UL–partner copubs (this domain)"] = pd.to_numeric(fr_df["Share of UL–partner copubs (this domain)"], errors="coerce") * 100.0
+    fr_df = pad_table_rows(fr_df, 20, numeric_cols=["Co-pubs in this domain","Share of UL–partner copubs (this domain)"])
     st.dataframe(
-        dfD[present_cols],
-        hide_index=True,
+        fr_df,
         use_container_width=True,
-        height=480,
+        hide_index=True,
         column_config={
-            **_number_cols_to_config(["Pubs", "Pubs LUE", "PPtop10%", "PPtop1%"], fmt="%.0f"),
-            **_number_cols_to_config(["Avg FWCI (France)", "FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"], fmt="%.2f"),
-            **_progress_cols_to_config([c for c in present_cols if c in DOMAIN_PERCENT_COLS]),
+            "Partner": st.column_config.TextColumn("Partner"),
+            "Co-pubs in this domain": st.column_config.NumberColumn("Co-pubs in this domain"),
+            "Share of UL–partner copubs (this domain)": st.column_config.ProgressColumn(
+                "% of UL–partner copubs", format="%.1f %%", min_value=0.0, max_value=float(fr_df["Share of UL–partner copubs (this domain)"].max() or 100.0)
+            ),
+            "Type": st.column_config.TextColumn("Type"),
         },
     )
-    _download_button(dfD[present_cols], "⬇️ Download overview (CSV)", "domains_overview.csv")
 
-    # Whisker chart (FWCI by domain)
-    st.markdown("### FWCI Distribution by Domain")
-    log_scale_domains = st.toggle("Log scale (FWCI)", value=False, key="domains_log")
-    stats_cols = ["Domain name", "FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"]
-    stats_df = dfD[[c for c in stats_cols if c in dfD.columns]].rename(
-        columns={"Domain name": "Name"}
-    )
-    stats_df = stats_df.dropna(subset=["FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"])
-    chart = whisker_chart(
-        stats_df.rename(columns={"Name": "Domain"}),
-        label_col="Domain",
-        min_col="FWCI_FR min",
-        q1_col="FWCI_FR Q1",
-        med_col="FWCI_FR Q2",
-        q3_col="FWCI_FR Q3",
-        max_col="FWCI_FR max",
-        title="FWCI (France baseline): min–Q1–median–Q3–max",
-        log_scale=log_scale_domains,
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("🔎 Drilldown by Domain")
-
-    # Domain selector for drilldown
-    all_domains = df_domains["Domain name"].dropna().unique().tolist()
-    selected_domain = st.selectbox("Select a domain", options=all_domains)
-
-    if selected_domain:
-        rowD = df_domains[df_domains["Domain name"] == selected_domain].head(1)
-        if rowD.empty:
-            st.info("No data for selected domain.")
-        else:
-            left, right = st.columns([1, 1])
-
-            # Field distribution within the domain
-            with left:
-                st.markdown("#### Field distribution in domain")
-                df_fields_counts = kv_to_df(rowD["By field: count"].iloc[0], key_name="Field ID", value_name="Pubs")
-                df_fields_share = kv_to_df(rowD["By field: % of domain pubs"].iloc[0], key_name="Field ID", value_name="Share")
-
-                df_fields_dist = pd.merge(df_fields_counts, df_fields_share, on="Field ID", how="outer")
-                # Enrich with field names if available
-                if "Field ID" in df_fields.columns and "Field name" in df_fields.columns:
-                    field_names = df_fields[["Field ID", "Field name"]].drop_duplicates()
-                    df_fields_dist = df_fields_dist.merge(field_names, on="Field ID", how="left")
-
-                if not df_fields_dist.empty:
-                    df_fields_dist["Share"] = _ensure_fraction(df_fields_dist["Share"])
-                    df_fields_dist = df_fields_dist.sort_values("Pubs", ascending=False)
-                    # Bar chart
-                    chart_fields = (
-                        alt.Chart(df_fields_dist)
-                        .mark_bar()
-                        .encode(
-                            y=alt.Y("Field name:N", sort="-x", title=None),
-                            x=alt.X("Pubs:Q", title="Publications"),
-                            tooltip=[
-                                alt.Tooltip("Field name:N", title="Field"),
-                                alt.Tooltip("Pubs:Q", title="Pubs", format=",.0f"),
-                                alt.Tooltip("Share:Q", title="Share", format=".1%"),
-                            ],
-                        )
-                        .properties(height=min(480, 24 * len(df_fields_dist) + 40), title=f"Fields within {selected_domain}")
-                    )
-                    st.altair_chart(chart_fields, use_container_width=True)
-                    _download_button(df_fields_dist, "⬇️ Download field distribution (CSV)", f"{selected_domain}_field_distribution.csv")
-                else:
-                    st.info("No field distribution data.")
-
-            # Labs contribution within the domain
-            with right:
-                st.markdown("#### Labs contribution")
-                df_lab_counts = kv_to_df(rowD["By lab: count"].iloc[0], key_name="Lab", value_name="Pubs")
-                df_lab_share = kv_to_df(rowD["By lab: % of domain pubs"].iloc[0], key_name="Lab", value_name="Share")
-                df_lab = pd.merge(df_lab_counts, df_lab_share, on="Lab", how="outer")
-                df_lab["Share"] = _ensure_fraction(df_lab["Share"])
-                df_lab = df_lab.sort_values("Pubs", ascending=False)
-
-                if not df_lab.empty:
-                    chart_labs = (
-                        alt.Chart(df_lab)
-                        .mark_bar()
-                        .encode(
-                            y=alt.Y("Lab:N", sort="-x", title=None),
-                            x=alt.X("Pubs:Q", title="Publications"),
-                            tooltip=[
-                                alt.Tooltip("Lab:N"),
-                                alt.Tooltip("Pubs:Q", format=",.0f"),
-                                alt.Tooltip("Share:Q", format=".1%"),
-                            ],
-                        )
-                        .properties(height=min(480, 24 * len(df_lab) + 40))
-                    )
-                    st.altair_chart(chart_labs, use_container_width=True)
-                    _download_button(df_lab, "⬇️ Download lab contributions (CSV)", f"{selected_domain}_labs.csv")
-                else:
-                    st.info("No lab contribution data.")
-
-            st.markdown("#### FWCI Whiskers by Lab")
-            # FWCI by lab within domain
-            labs_fwci_cols = [
-                "By lab: FWCI_FR min",
-                "By lab: FWCI_FR Q1",
-                "By lab: FWCI_FR Q2",
-                "By lab: FWCI_FR Q3",
-                "By lab: FWCI_FR max",
-            ]
-            lab_fwci_frames = []
-            for c in labs_fwci_cols:
-                df_tmp = kv_to_df(rowD[c].iloc[0], key_name="Lab", value_name=c)
-                lab_fwci_frames.append(df_tmp)
-            if lab_fwci_frames:
-                df_lfwci = lab_fwci_frames[0]
-                for extra in lab_fwci_frames[1:]:
-                    df_lfwci = df_lfwci.merge(extra, on="Lab", how="outer")
-                df_lfwci = df_lfwci.dropna()
-                st.altair_chart(
-                    whisker_chart(
-                        df_lfwci,
-                        label_col="Lab",
-                        min_col="By lab: FWCI_FR min",
-                        q1_col="By lab: FWCI_FR Q1",
-                        med_col="By lab: FWCI_FR Q2",
-                        q3_col="By lab: FWCI_FR Q3",
-                        max_col="By lab: FWCI_FR max",
-                        title=f"FWCI by lab — {selected_domain}",
-                        log_scale=False,
-                        height=22,
-                    ),
-                    use_container_width=True,
-                )
-                _download_button(df_lfwci, "⬇️ Download labs FWCI stats (CSV)", f"{selected_domain}_labs_fwci.csv")
-            else:
-                st.info("No FWCI-by-lab stats.")
-
-            # Partners
-            st.markdown("#### Top partners in this domain")
-            pcol1, pcol2 = st.columns(2)
-            with pcol1:
-                st.markdown("##### 🇫🇷 French partners")
-                fr_names = _pipe_split(rowD["Top 20 FR partners (name)"].iloc[0])
-                fr_counts = _pipe_to_numeric(rowD["Top 20 FR partners (totals copubs in this domain)"].iloc[0], int)
-                df_fr = pd.DataFrame({"Partner": fr_names, "Co-pubs": fr_counts}).sort_values("Co-pubs", ascending=False)
-                st.dataframe(_topn(df_fr, 20), hide_index=True, use_container_width=True)
-                _download_button(df_fr, "⬇️ Download FR partners", f"{selected_domain}_partners_FR.csv")
-            with pcol2:
-                st.markdown("##### 🌍 International partners")
-                int_names = _pipe_split(rowD["Top 20 int partners (name)"].iloc[0])
-                int_counts = _pipe_to_numeric(rowD["Top 20 int partners (totals copubs in this domain)"].iloc[0], int)
-                int_countries = _pipe_split(rowD.get("Top 20 int partners (country)", [""] * len(int_names)).iloc[0] if "Top 20 int partners (country)" in rowD else "")
-                df_int = pd.DataFrame({"Partner": int_names, "Country": int_countries, "Co-pubs": int_counts}).sort_values("Co-pubs", ascending=False)
-                st.dataframe(_topn(df_int, 20), hide_index=True, use_container_width=True)
-                _download_button(df_int, "⬇️ Download INT partners", f"{selected_domain}_partners_INT.csv")
-
-            # Authors
-            st.markdown("#### Top authors in this domain")
-            a_names = _pipe_split(rowD["Top 20 authors (name)"].iloc[0])
-            a_pubs = _pipe_to_numeric(rowD["Top 20 authors (pubs)"].iloc[0], int)
-            a_fwci = _pipe_to_numeric(rowD["Top 20 authors (Average FWCI_FR)"].iloc[0], float)
-            df_auth = pd.DataFrame({"Author": a_names, "Pubs": a_pubs, "Avg FWCI_FR": a_fwci}).sort_values(["Pubs", "Avg FWCI_FR"], ascending=[False, False])
-            st.dataframe(_topn(df_auth, 20), hide_index=True, use_container_width=True, column_config=_number_cols_to_config(["Pubs"], "%.0f") | _number_cols_to_config(["Avg FWCI_FR"], "%.2f"))
-            _download_button(df_auth, "⬇️ Download authors", f"{selected_domain}_authors.csv")
-
-            # Optional comparison of field share within domain vs benchmark
-            if not df_benchmark.empty:
-                st.markdown("#### 📊 Compare field shares with benchmark (optional)")
-                # Find same domain in benchmark
-                bench_row = df_benchmark[df_benchmark.get("Domain name", "") == selected_domain].head(1)
-                if not bench_row.empty and "By field: % of domain pubs" in bench_row.columns:
-                    df_me_share = kv_to_df(rowD["By field: % of domain pubs"].iloc[0], key_name="Field ID", value_name="UL Share")
-                    df_bench_share = kv_to_df(bench_row["By field: % of domain pubs"].iloc[0], key_name="Field ID", value_name="Benchmark Share")
-                    comp = df_me_share.merge(df_bench_share, on="Field ID", how="outer")
-                    # Map field names if available
-                    if "Field ID" in df_fields.columns and "Field name" in df_fields.columns:
-                        comp = comp.merge(df_fields[["Field ID", "Field name"]].drop_duplicates(), on="Field ID", how="left")
-                    comp["UL Share"] = _ensure_fraction(comp["UL Share"])
-                    comp["Benchmark Share"] = _ensure_fraction(comp["Benchmark Share"])
-                    comp = comp.fillna(0.0)
-                    chart_comp = (
-                        alt.Chart(comp.melt(id_vars=["Field ID", "Field name"], value_vars=["UL Share", "Benchmark Share"], var_name="Who", value_name="Share"))
-                        .mark_bar()
-                        .encode(
-                            y=alt.Y("Field name:N", sort="-x", title=None),
-                            x=alt.X("Share:Q", axis=alt.Axis(format="%")),
-                            color=alt.Color("Who:N"),
-                            tooltip=[alt.Tooltip("Field name:N"), alt.Tooltip("Who:N"), alt.Tooltip("Share:Q", format=".1%")],
-                        )
-                        .properties(height=min(500, 26 * comp.shape[0] + 40), title=f"Share within {selected_domain}: UL vs Benchmark")
-                    )
-                    st.altair_chart(chart_comp, use_container_width=True)
-                    _download_button(comp, "⬇️ Download share comparison", f"{selected_domain}_field_share_vs_benchmark.csv")
-                else:
-                    st.info("No matching domain in benchmark or missing share column.")
-
-# -----------------------------------------------------------------------------
-# TAB 2: FIELDS
-# -----------------------------------------------------------------------------
-with tab_fields:
-    st.subheader("Field Overview")
-
-    # Filters
-    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
-    # Optional domain filter to subset fields by domain membership, if joinable via "By field: ..." is not present here.
-    # We assume "Field name" is unique; domain filter not strictly needed unless the dataset includes it.
-    field_search = c1.text_input("Search field name", placeholder="e.g., Engineering")
-    sort_field = c2.selectbox(
-        "Sort by",
-        ["Pubs", "Avg FWCI (France)", "% PPtop10% (field level)", "% PPtop1% (field level)"],
-        index=0,
-    )
-    asc_field = c3.toggle("Ascending sort", value=False, key="fields_sort_asc")
-    log_scale_fields = c4.toggle("Log scale (FWCI whiskers)", value=True, key="fields_log")
-
-    dfF = df_fields.copy()
-    if field_search:
-        dfF = dfF[dfF["Field name"].str.contains(field_search, case=False, na=False)]
-    dfF = dfF.sort_values(sort_field, ascending=asc_field)
-
-    field_overview_cols = [
-        "Field name",
-        "Pubs",
-        "% Pubs (uni level)",
-        "Pubs LUE",
-        "% Pubs LUE (field level)",
-        "% Pubs LUE (uni level)",
-        "PPtop10%",
-        "% PPtop10% (field level)",
-        "% PPtop10% (uni level)",
-        "PPtop1%",
-        "% PPtop1% (field level)",
-        "% PPtop1% (uni level)",
-        "Avg FWCI (France)",
-        "FWCI_FR min",
-        "FWCI_FR Q1",
-        "FWCI_FR Q2",
-        "FWCI_FR Q3",
-        "FWCI_FR max",
-        "% internal collaboration",
-        "% international",
-        "% industrial",
-    ]
-    present_cols_f = [c for c in field_overview_cols if c in dfF.columns]
+# International partners
+st.markdown("**Top 20 international partners**")
+int_df = parse_parallel_lists(
+    drow.get("Top 20 int partners (name)", ""),
+    drow.get("Top 20 int partners (type)", ""),
+    drow.get("Top 20 int partners (country)", ""),
+    drow.get("Top 20 int partners (totals copubs in this domain)", ""),
+    drow.get("Top 20 int partners (% of UL total copubs)", ""),
+)
+if int_df.empty:
+    st.info("No international partners listed for this domain.")
+else:
+    int_df = int_df.rename(columns={
+        "name":"Partner", "type":"Type", "country":"Country",
+        "count":"Co-pubs in this domain", "pct_ul":"Share of UL–partner copubs (this domain)"
+    })
+    int_df["Share of UL–partner copubs (this domain)"] = pd.to_numeric(int_df["Share of UL–partner copubs (this domain)"], errors="coerce") * 100.0
+    int_df = pad_table_rows(int_df, 20, numeric_cols=["Co-pubs in this domain","Share of UL–partner copubs (this domain)"])
     st.dataframe(
-        dfF[present_cols_f],
-        hide_index=True,
+        int_df,
         use_container_width=True,
-        height=480,
+        hide_index=True,
         column_config={
-            **_number_cols_to_config(["Pubs", "Pubs LUE", "PPtop10%", "PPtop1%"], fmt="%.0f"),
-            **_number_cols_to_config(["Avg FWCI (France)", "FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"], fmt="%.2f"),
-            **_progress_cols_to_config([c for c in present_cols_f if c in FIELD_PERCENT_COLS]),
+            "Partner": st.column_config.TextColumn("Partner"),
+            "Country": st.column_config.TextColumn("Country"),
+            "Co-pubs in this domain": st.column_config.NumberColumn("Co-pubs in this domain"),
+            "Share of UL–partner copubs (this domain)": st.column_config.ProgressColumn(
+                "% of UL–partner copubs", format="%.1f %%", min_value=0.0, max_value=float(int_df["Share of UL–partner copubs (this domain)"].max() or 100.0)
+            ),
+            "Type": st.column_config.TextColumn("Type"),
         },
     )
-    _download_button(dfF[present_cols_f], "⬇️ Download overview (CSV)", "fields_overview.csv")
 
-    # FWCI whiskers by field (log-scale default)
-    st.markdown("### FWCI Distribution by Field")
-    stats_cols_f = ["Field name", "FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"]
-    stats_ff = dfF[[c for c in stats_cols_f if c in dfF.columns]].rename(columns={"Field name": "Field"})
-    stats_ff = stats_ff.dropna(subset=["FWCI_FR min", "FWCI_FR Q1", "FWCI_FR Q2", "FWCI_FR Q3", "FWCI_FR max"])
-    chartF = whisker_chart(
-        stats_ff,
-        label_col="Field",
-        min_col="FWCI_FR min",
-        q1_col="FWCI_FR Q1",
-        med_col="FWCI_FR Q2",
-        q3_col="FWCI_FR Q3",
-        max_col="FWCI_FR max",
-        title="FWCI (France baseline): min–Q1–median–Q3–max",
-        log_scale=log_scale_fields,
+st.markdown("---")
+
+# ------------------------ Top authors in this domain ------------------------
+
+st.markdown("#### Top 20 authors")
+
+def _explode(cell: str) -> List[str]:
+    if pd.isna(cell) or cell is None:
+        return []
+    return [c.strip() for c in str(cell).replace(";", "|").split("|") if c.strip()]
+
+auth_names = _explode(drow.get("Top 20 authors (name)", ""))
+if not auth_names:
+    st.info("No authors listed for this domain.")
+else:
+    n = len(auth_names)
+    def pad(lst, fill):
+        return lst + [fill] * max(0, n - len(lst))
+
+    pubs   = pad([_to_int_safe(x) for x in _explode(drow.get("Top 20 authors (pubs)", ""))], 0)
+    fwci   = pad([_to_float_safe(x) for x in _explode(drow.get("Top 20 authors (Average FWCI_FR)", ""))], np.nan)
+    top10  = pad([_to_int_safe(x) for x in _explode(drow.get("Top 20 authors (PPtop10% Count)", ""))], 0)
+    top1   = pad([_to_int_safe(x) for x in _explode(drow.get("Top 20 authors (PPtop1% Count)", ""))], 0)
+    isul   = pad([str(x).strip().lower()=="true" for x in _explode(drow.get("Top 20 authors (Is Lorraine)", ""))], False)
+    orcid  = pad([x.split("|")[0].strip() if x else "" for x in _explode(drow.get("Top 20 authors (Orcid)", ""))], "")
+    aid    = pad([x.split("|")[0].strip() if x else "" for x in _explode(drow.get("Top 20 authors (ID)", ""))], "")
+
+    top_df = pd.DataFrame({
+        "Author": auth_names,
+        "Pubs in this domain": pubs,
+        "Avg FWCI (FR)": fwci,
+        "Top10 count": top10,
+        "Top1 count": top1,
+        "Is UL": ["Yes" if b else "No" for b in isul],
+        "ORCID": orcid,
+        "Author ID": aid,
+    })
+
+    # Optional enrichment: total pubs at UL via authors parquet (if available)
+    total_map_by_id, total_map_by_orcid = {}, {}
+    # If you have an authors parquet with "Author ID"/"ORCID"/"Publications (unique)", populate these maps here.
+
+    top_df["Total pubs (UL)"] = pd.to_numeric(top_df["Author ID"].map(total_map_by_id), errors="coerce")
+    missing = top_df["Total pubs (UL)"].isna()
+    top_df.loc[missing, "Total pubs (UL)"] = pd.to_numeric(top_df.loc[missing, "ORCID"].map(total_map_by_orcid), errors="coerce")
+    denom = top_df["Total pubs (UL)"].replace(0, pd.NA)
+    top_df["% in this domain"] = ((top_df["Pubs in this domain"] / denom).fillna(0.0) * 100.0).clip(lower=0)
+
+    show_ids = st.toggle("Show ORCID and Author ID", False, key="authors_ids_toggle")
+    cols_basic = ["Author","Pubs in this domain","Total pubs (UL)","% in this domain","Avg FWCI (FR)","Top10 count","Top1 count","Is UL"]
+    cols_all = cols_basic + ["ORCID","Author ID"]
+    st.dataframe(
+        top_df[cols_all if show_ids else cols_basic],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Pubs in this domain": st.column_config.NumberColumn("Pubs in this domain"),
+            "Total pubs (UL)": st.column_config.NumberColumn("Total pubs (UL)"),
+            "% in this domain": st.column_config.ProgressColumn("% in this domain", format="%.1f %%", min_value=0.0, max_value=float(top_df["% in this domain"].max() or 100.0)),
+            "Avg FWCI (FR)": st.column_config.NumberColumn("Avg FWCI (FR)", format="%.3f"),
+        },
     )
-    st.altair_chart(chartF, use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("🔎 Drilldown by Field")
+st.divider()
 
-    # Field selector
-    all_fields = df_fields["Field name"].dropna().unique().tolist()
-    selected_field = st.selectbox("Select a field", options=all_fields)
+# ============================== UL vs Partner — field shape inside a domain ==============================
 
-    if selected_field:
-        rowF = df_fields[df_fields["Field name"] == selected_field].head(1)
-        if rowF.empty:
-            st.info("No data for selected field.")
+st.subheader("Compare field shape inside a domain (UL vs partner)")
+
+# pick domain & partner
+col1, col2 = st.columns(2)
+with col1:
+    cmp_domain = st.selectbox("Domain", options=domains_list, index=max(0, domains_list.index(sel_domain)))
+with col2:
+    partners_list = sorted(df_fields["Institution name"].dropna().astype(str).unique().tolist())
+    default_partner = "Université de Strasbourg"
+    p_index = partners_list.index(default_partner) if default_partner in partners_list else 0
+    partner_name = st.selectbox("Partner", options=partners_list, index=p_index)
+
+# UL side from ul_domains_indicators
+ul_row = df_domains.loc[df_domains["Domain name"] == cmp_domain]
+if ul_row.empty:
+    st.info("Selected domain not found for UL in domain indicators.")
+else:
+    ul_row = ul_row.iloc[0]
+    ul_fld_cnt = parse_id_count_blob(ul_row.get("By field: count", ""))
+    ul_fld_pct = parse_id_value_blob(ul_row.get("By field: % of domain pubs", ""))
+    ul_df = pd.merge(ul_fld_cnt, ul_fld_pct, on="id", how="outer").fillna({"count":0, "value":0.0})
+    ul_df["Field"] = ul_df["id"].astype(str).apply(lambda t: look["id2name"].get(t, t) if t.isdigit() else t)
+    ul_df["Label"] = ul_df["Field"]
+    ul_df["pct"] = pd.to_numeric(ul_df["value"], errors="coerce").fillna(0.0)  # 0..1
+    ul_df["color"] = ul_df["Field"].apply(get_field_color)
+
+# Partner side from ul_fields_indicators
+prow = df_fields.loc[df_fields["Institution name"] == partner_name]
+if prow.empty:
+    st.info("Selected partner not found in fields indicators.")
+else:
+    prow = prow.iloc[0]
+    # domain total for this partner: parse "By domain: count" and pick this domain id
+    dom_id = look["name2id"].get(cmp_domain)  # string id like "3"
+    p_dom_counts = parse_id_count_blob(prow.get("By domain: count", ""))
+    if p_dom_counts.empty or dom_id is None:
+        st.info("Partner domain totals unavailable for comparison.")
+    else:
+        # keep id as numeric-ish or string; entries in file likely like '1 (1453)'
+        # We'll match either id or domain name
+        dom_total = 0
+        # try id match
+        m_id = p_dom_counts.loc[p_dom_counts["id"].astype(str) == str(dom_id)]
+        if not m_id.empty:
+            dom_total = int(m_id["count"].iloc[0])
         else:
-            lcol, rcol = st.columns([1, 1])
+            # try name match
+            m_nm = p_dom_counts.loc[p_dom_counts["id"].astype(str) == cmp_domain]
+            if not m_nm.empty:
+                dom_total = int(m_nm["count"].iloc[0])
 
-            # Subfield distribution
-            with lcol:
-                st.markdown("#### Subfield distribution in field")
-                sf_counts = kv_to_df(rowF["By subfield: count"].iloc[0], key_name="Subfield ID", value_name="Pubs")
-                sf_share = kv_to_df(rowF["By subfield: % of field pubs"].iloc[0], key_name="Subfield ID", value_name="Share")
-                sf = pd.merge(sf_counts, sf_share, on="Subfield ID", how="outer")
-                sf["Share"] = _ensure_fraction(sf["Share"])
-                sf = sf.sort_values("Pubs", ascending=False)
-
-                if not sf.empty:
-                    # We might not have subfield names in this file; show ID as fallback
-                    sf["Label"] = sf["Subfield ID"].astype(str)
-                    chart_sf = (
-                        alt.Chart(sf)
-                        .mark_bar()
-                        .encode(
-                            y=alt.Y("Label:N", sort="-x", title=None),
-                            x=alt.X("Pubs:Q", title="Publications"),
-                            tooltip=[
-                                alt.Tooltip("Label:N", title="Subfield"),
-                                alt.Tooltip("Pubs:Q", format=",.0f"),
-                                alt.Tooltip("Share:Q", format=".1%"),
-                            ],
-                        )
-                        .properties(height=min(480, 24 * len(sf) + 40), title=f"Subfields within {selected_field}")
-                    )
-                    st.altair_chart(chart_sf, use_container_width=True)
-                    _download_button(sf, "⬇️ Download subfield distribution", f"{selected_field}_subfields.csv")
-                else:
-                    st.info("No subfield distribution data.")
-
-            # Labs contribution within field
-            with rcol:
-                st.markdown("#### Labs contribution")
-                lf_counts = kv_to_df(rowF["By lab: count"].iloc[0], key_name="Lab", value_name="Pubs")
-                lf_share = kv_to_df(rowF["By lab: % of field pubs"].iloc[0], key_name="Lab", value_name="Share")
-                lf = pd.merge(lf_counts, lf_share, on="Lab", how="outer")
-                lf["Share"] = _ensure_fraction(lf["Share"])
-                lf = lf.sort_values("Pubs", ascending=False)
-
-                if not lf.empty:
-                    chart_lf = (
-                        alt.Chart(lf)
-                        .mark_bar()
-                        .encode(
-                            y=alt.Y("Lab:N", sort="-x", title=None),
-                            x=alt.X("Pubs:Q", title="Publications"),
-                            tooltip=[
-                                alt.Tooltip("Lab:N"),
-                                alt.Tooltip("Pubs:Q", format=",.0f"),
-                                alt.Tooltip("Share:Q", format=".1%"),
-                            ],
-                        )
-                        .properties(height=min(480, 24 * len(lf) + 40))
-                    )
-                    st.altair_chart(chart_lf, use_container_width=True)
-                    _download_button(lf, "⬇️ Download lab contributions", f"{selected_field}_labs.csv")
-                else:
-                    st.info("No lab contribution data.")
-
-            # FWCI by lab within field
-            st.markdown("#### FWCI Whiskers by Lab")
-            labs_fwci_cols_f = [
-                "By lab: FWCI_FR min",
-                "By lab: FWCI_FR Q1",
-                "By lab: FWCI_FR Q2",
-                "By lab: FWCI_FR Q3",
-                "By lab: FWCI_FR max",
-            ]
-            lab_fwci_frames_f = []
-            for c in labs_fwci_cols_f:
-                df_tmp = kv_to_df(rowF[c].iloc[0], key_name="Lab", value_name=c)
-                lab_fwci_frames_f.append(df_tmp)
-            if lab_fwci_frames_f:
-                df_lfwci_f = lab_fwci_frames_f[0]
-                for extra in lab_fwci_frames_f[1:]:
-                    df_lfwci_f = df_lfwci_f.merge(extra, on="Lab", how="outer")
-                df_lfwci_f = df_lfwci_f.dropna()
-                st.altair_chart(
-                    whisker_chart(
-                        df_lfwci_f,
-                        label_col="Lab",
-                        min_col="By lab: FWCI_FR min",
-                        q1_col="By lab: FWCI_FR Q1",
-                        med_col="By lab: FWCI_FR Q2",
-                        q3_col="By lab: FWCI_FR Q3",
-                        max_col="By lab: FWCI_FR max",
-                        title=f"FWCI by lab — {selected_field}",
-                        log_scale=False,
-                        height=22,
-                    ),
-                    use_container_width=True,
-                )
-                _download_button(df_lfwci_f, "⬇️ Download labs FWCI stats (CSV)", f"{selected_field}_labs_fwci.csv")
+        if dom_total <= 0:
+            st.info("Partner has zero publications in this domain for 2019–2023.")
+        else:
+            # partner field counts (all fields) -> keep only fields that belong to cmp_domain
+            p_field_counts = parse_id_count_blob(prow.get("By field: count", ""))
+            if p_field_counts.empty:
+                st.info("Partner field counts unavailable.")
             else:
-                st.info("No FWCI-by-lab stats.")
+                def field_belongs_to_domain(fid_tok: str) -> bool:
+                    tok = str(fid_tok).strip()
+                    if tok.isdigit():
+                        return look["field_id_to_domain"].get(tok) == cmp_domain
+                    # if name provided, map to id then check
+                    fid = look["name2id"].get(tok)
+                    if fid:
+                        return look["field_id_to_domain"].get(fid) == cmp_domain
+                    # last resort: assume it's a field name and consult fields_by_domain
+                    return tok in look["fields_by_domain"].get(cmp_domain, [])
+                p_field_counts = p_field_counts[p_field_counts["id"].astype(str).apply(field_belongs_to_domain)].copy()
+                partner_df = p_field_counts.copy()
+                partner_df["Field"] = partner_df["id"].astype(str).apply(lambda t: look["id2name"].get(t, t) if t.isdigit() else t)
+                partner_df["Label"] = partner_df["Field"]
+                partner_df["pct"] = partner_df["count"].astype(float) / float(dom_total)  # 0..1
+                partner_df["color"] = partner_df["Field"].apply(get_field_color)
 
-            # Partners (Top 10)
-            st.markdown("#### Top partners in this field")
-            pf1, pf2 = st.columns(2)
-            with pf1:
-                st.markdown("##### 🇫🇷 French partners")
-                fr_names = _pipe_split(rowF["Top 10 FR partners (name)"].iloc[0])
-                fr_counts = _pipe_to_numeric(rowF["Top 10 FR partners (totals copubs in this field)"].iloc[0], int)
-                df_fr = pd.DataFrame({"Partner": fr_names, "Co-pubs": fr_counts}).sort_values("Co-pubs", ascending=False)
-                st.dataframe(df_fr, hide_index=True, use_container_width=True)
-                _download_button(df_fr, "⬇️ Download FR partners", f"{selected_field}_partners_FR.csv")
-            with pf2:
-                st.markdown("##### 🌍 International partners")
-                int_names = _pipe_split(rowF["Top 10 int partners (name)"].iloc[0])
-                int_counts = _pipe_to_numeric(rowF["Top 10 int partners (totals copubs in this field)"].iloc[0], int)
-                int_countries = _pipe_split(rowF.get("Top 10 int partners (country)", [""] * len(int_names)).iloc[0] if "Top 10 int partners (country)" in rowF else "")
-                df_int = pd.DataFrame({"Partner": int_names, "Country": int_countries, "Co-pubs": int_counts}).sort_values("Co-pubs", ascending=False)
-                st.dataframe(df_int, hide_index=True, use_container_width=True)
-                _download_button(df_int, "⬇️ Download INT partners", f"{selected_field}_partners_INT.csv")
+                # Canonical order for cmp_domain
+                canon_domain_fields = [f for f in look["fields_by_domain"].get(cmp_domain, []) if f in set(ul_df["Field"]).union(set(partner_df["Field"]))]
+                if not canon_domain_fields:
+                    canon_domain_fields = sorted(set(ul_df["Field"]).union(set(partner_df["Field"])))
 
-            # Authors (Top 10)
-            st.markdown("#### Top authors in this field")
-            a_names = _pipe_split(rowF["Top 10 authors (name)"].iloc[0])
-            a_pubs = _pipe_to_numeric(rowF["Top 10 authors (pubs)"].iloc[0], int)
-            a_fwci = _pipe_to_numeric(rowF["Top 10 authors (Average FWCI_FR)"].iloc[0], float)
-            df_auth = pd.DataFrame({"Author": a_names, "Pubs": a_pubs, "Avg FWCI_FR": a_fwci}).sort_values(["Pubs", "Avg FWCI_FR"], ascending=[False, False])
-            st.dataframe(df_auth, hide_index=True, use_container_width=True, column_config=_number_cols_to_config(["Pubs"], "%.0f") | _number_cols_to_config(["Avg FWCI_FR"], "%.2f"))
-            _download_button(df_auth, "⬇️ Download authors", f"{selected_field}_authors.csv")
+                # Shared x-scale
+                share_max_cmp = float(max(ul_df["pct"].max() if not ul_df.empty else 0.0,
+                                          partner_df["pct"].max() if not partner_df.empty else 0.0,
+                                          0.05))
 
-            # Optional: OpenAlex link if present
-            if "See in OpenAlex" in rowF.columns and pd.notna(rowF["See in OpenAlex"].iloc[0]):
-                st.link_button("🔗 See in OpenAlex", url=str(rowF["See in OpenAlex"].iloc[0]), use_container_width=False)
+                cL, cR = st.columns(2)
+                with cL:
+                    fig_ul = plot_barh_with_gutter(
+                        df=ul_df.rename(columns={"pct":"value", "count":"count"})[["Label","value","count","color"]]
+                              .assign(**{"%value": lambda x: x["value"]}),
+                        order_labels=canon_domain_fields,
+                        value_col="%value",
+                        count_col="count",
+                        title=f"{cmp_domain} — UL: % of domain publications by field",
+                        color_col="color",
+                        x_label="% of domain publications",
+                        share_max=share_max_cmp,
+                    )
+                    st.pyplot(fig_ul, use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# Footer help
-# -----------------------------------------------------------------------------
-with st.expander("ℹ️ Tips & Notes"):
-    st.markdown(
-        """
-- **Progress bars** assume percent columns are either in `[0,1]` or `[0,100]` and normalize automatically.
-- **Whisker plots** show FWCI_FR range and quartiles. Toggle **log scale** for right-skewed distributions.
-- Use the **optional benchmark upload** in the sidebar to compare field shares within a selected domain (e.g., *“within Physical Sciences, 23% vs 50%”*).
-- All tables are downloadable as CSV.
-"""
-    )
+                with cR:
+                    fig_partner = plot_barh_with_gutter(
+                        df=partner_df.rename(columns={"pct":"value"})[["Label","value","count","color"]]
+                                  .assign(**{"%value": lambda x: x["value"]}),
+                        order_labels=canon_domain_fields,
+                        value_col="%value",
+                        count_col="count",
+                        title=f"{cmp_domain} — {partner_name}: % of domain publications by field",
+                        color_col="color",
+                        x_label="% of domain publications",
+                        share_max=share_max_cmp,
+                    )
+                    st.pyplot(fig_partner, use_container_width=True)
