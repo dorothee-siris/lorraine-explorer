@@ -433,79 +433,116 @@ st.divider()
 
 st.subheader("Per-lab overview (2019–2023)")
 
-# Build overview (use only precomputed columns from ul_units_indicators)
-col_map = {
-    "ROR": "ROR",
-    "Unit Name": "Unit Name",
-    "Pubs": "Pubs",
-    "% Pubs (uni level)": "% Pubs (uni level)",
+# Only labs
+labs_overview = df_units[df_units["Type"].astype(str).str.lower().eq("lab")].copy()
+
+# Columns we need from ul_units_indicators (use exact names from the parquet)
+needed_cols = [
+    "ROR",
+    "Unit Name",
+    "Pubs",
+    "% Pubs (uni level)",
+    "Pubs LUE",
+    "% Pubs LUE (lab level)",
+    "% collab w/ another internal lab",
+    "% collab w/ another internal structure",
+    "% international",
+    "% industrial",
+    "Avg FWCI (France)",
+    "See in OpenAlex",
+]
+
+# If any column is missing, create a safe default so we never KeyError
+for c in needed_cols:
+    if c not in labs_overview.columns:
+        # Percent-like columns get 0.0, ints get 0, text gets ""
+        if c in {"% Pubs (uni level)", "% Pubs LUE (lab level)",
+                 "% collab w/ another internal lab", "% collab w/ another internal structure",
+                 "% international", "% industrial"}:
+            labs_overview[c] = 0.0
+        elif c in {"Pubs"}:
+            labs_overview[c] = 0
+        else:
+            labs_overview[c] = ""
+
+summary = labs_overview[needed_cols].copy()
+
+# Friendly column names (also place new internal-collab columns)
+summary = summary.rename(columns={
+    "Unit Name": "Lab",
+    "Pubs": "Publications",
+    "% Pubs (uni level)": "% UL pubs",
     "Pubs LUE": "Pubs LUE",
-    "% Pubs LUE (lab level)": "% Pubs LUE (lab level)",
-    "% collab w/ another internal lab": "% collab w/ another internal lab",
-    "% collab w/ another internal structure": "% collab w/ another internal structure",
+    "% Pubs LUE (lab level)": "% LUE (lab)",
+    "% collab w/ another internal lab": "% internal collabs (lab)",
+    "% collab w/ another internal structure": "% internal collabs (other)",
     "% international": "% international",
     "% industrial": "% industrial",
-    "Avg FWCI (France)": "Avg FWCI (France)",
-    "See in OpenAlex": "See in OpenAlex",
-}
-missing_cols = [c for c in col_map.values() if c not in df_units.columns]
-if missing_cols:
-    st.error(f"Missing columns in ul_units_indicators.parquet for overview table: {missing_cols}")
-else:
-    labs_overview = df_units[df_units["Type"].astype(str).str.lower() == "lab"].copy()
-    summary = labs_overview[list(col_map.values())].copy()
-   
-    # sensible maxima for progress columns
-    max_share = float((summary["% Pubs (uni level)"] * 100.0).max() or 1.0)
-    max_lue   = float((summary["% Pubs LUE (lab level)"] * 100.0).max() or 1.0)
-    max_intl  = float((summary["% international"] * 100.0).max() or 1.0)
-    max_comp  = float((summary["% industrial"] * 100.0).max() or 1.0)
-    max_collab_lab   = float(summary["% internal collabs (lab)"].max() or 1.0)
-    max_collab_other = float(summary["% internal collabs (other)"].max() or 1.0)
+    "Avg FWCI (France)": "Avg FWCI (FR)",
+    "See in OpenAlex": "OpenAlex",
+})
 
-    summary = summary.rename(columns={
-        "Unit Name": "Lab",
-        "Pubs": "Publications",
-        "% Pubs (uni level)": "% UL pubs",
-        "Pubs LUE": "Pubs LUE",
-        "% Pubs LUE (lab level)": "% LUE (lab)",
-        "% collab w/ another internal lab": "% internal collabs (lab)",
-        "% collab w/ another internal structure": "% internal collabs (other)",
-        "% international": "% international",
-        "% industrial": "% industrial",
-        "Avg FWCI (France)": "Avg FWCI (FR)",
-        "See in OpenAlex": "OpenAlex",
-    })
+# Convert precomputed ratios (0–1) to percentages
+pct_cols = [
+    "% UL pubs",
+    "% LUE (lab)",
+    "% internal collabs (lab)",
+    "% internal collabs (other)",
+    "% international",
+    "% industrial",
+]
+for c in pct_cols:
+    summary[c] = pd.to_numeric(summary[c], errors="coerce") * 100.0
 
-    # display-friendly %
-    for pc in ["% UL pubs", "% LUE (lab)","% internal collabs (lab)","% internal collabs (other)", "% international", "% industrial"]:
-        summary[pc] = pd.to_numeric(summary[pc], errors="coerce") * 100.0
+# Sort by publications
+summary = summary.sort_values("Publications", ascending=False)
 
-    summary = summary.sort_values("Publications", ascending=False)
+# Maxima for progress bars
+max_share         = float(summary["% UL pubs"].max() or 1.0)
+max_lue           = float(summary["% LUE (lab)"].max() or 1.0)
+max_collab_lab    = float(summary["% internal collabs (lab)"].max() or 1.0)
+max_collab_other  = float(summary["% internal collabs (other)"].max() or 1.0)
+max_intl          = float(summary["% international"].max() or 1.0)
+max_comp          = float(summary["% industrial"].max() or 1.0)
 
-    st.dataframe(
-        summary,
-        use_container_width=True,
-        hide_index=True,
-        column_order=[
-            "Lab", "Publications", "% UL pubs", "Pubs LUE", "% LUE (lab)","% internal collabs (lab)", "% internal collabs (other)",
-            "% international", "% industrial", "Avg FWCI (FR)", "OpenAlex", "ROR"  # ROR last
-        ],
-        column_config={
-            "Lab": st.column_config.TextColumn("Lab"),
-            "Publications": st.column_config.NumberColumn("Publications", format="%.0f"),
-            "% UL pubs":   st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
-            "Pubs LUE":    st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
-            "% LUE (lab)": st.column_config.ProgressColumn("% of pubs LUE",            format="%.1f %%", min_value=0.0, max_value=max_lue),
-            "% internal collabs (lab)": st.column_config.ProgressColumn("% internal collabs (lab)", format="%.1f %%", min_value=0.0, max_value=max_collab_lab),
-            "% internal collabs (other)": st.column_config.ProgressColumn("% internal collabs (other)", format="%.1f %%", min_value=0.0, max_value=max_collab_other),
-            "% international": st.column_config.ProgressColumn("% international",      format="%.1f %%", min_value=0.0, max_value=max_intl),
-            "% industrial":    st.column_config.ProgressColumn("% with company",       format="%.1f %%", min_value=0.0, max_value=max_comp),
-            "Avg FWCI (FR)": st.column_config.NumberColumn("Avg. FWCI (FR)", format="%.3f"),
-            "OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
-            "ROR":      st.column_config.TextColumn("ROR"),
-        },
-    )
+# Display (ROR last; new collab columns between % LUE and % international)
+st.dataframe(
+    summary,
+    use_container_width=True,
+    hide_index=True,
+    column_order=[
+        "Lab", "Publications", "% UL pubs", "Pubs LUE", "% LUE (lab)",
+        "% internal collabs (lab)", "% internal collabs (other)",
+        "% international", "% industrial",
+        "Avg FWCI (FR)", "OpenAlex", "ROR",
+    ],
+    column_config={
+        "Lab": st.column_config.TextColumn("Lab"),
+        "Publications": st.column_config.NumberColumn("Publications", format="%.0f"),
+        "% UL pubs": st.column_config.ProgressColumn(
+            "% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share
+        ),
+        "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
+        "% LUE (lab)": st.column_config.ProgressColumn(
+            "% of pubs LUE", format="%.1f %%", min_value=0.0, max_value=max_lue
+        ),
+        "% internal collabs (lab)": st.column_config.ProgressColumn(
+            "% internal collabs (lab)", format="%.1f %%", min_value=0.0, max_value=max_collab_lab
+        ),
+        "% internal collabs (other)": st.column_config.ProgressColumn(
+            "% internal collabs (other)", format="%.1f %%", min_value=0.0, max_value=max_collab_other
+        ),
+        "% international": st.column_config.ProgressColumn(
+            "% international", format="%.1f %%", min_value=0.0, max_value=max_intl
+        ),
+        "% industrial": st.column_config.ProgressColumn(
+            "% with company", format="%.1f %%", min_value=0.0, max_value=max_comp
+        ),
+        "Avg FWCI (FR)": st.column_config.NumberColumn("Avg. FWCI (FR)", format="%.3f"),
+        "OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
+        "ROR": st.column_config.TextColumn("ROR"),
+    },
+)
 
 st.divider()
 
