@@ -477,7 +477,10 @@ def plot_fwci_whiskers(df_fwci: pd.DataFrame,
     ax.set_title(title, fontsize=12, pad=6)
     ax.set_yticks(y)
     ax.set_yticklabels(df["field_name"], fontsize=10)
-    ax.invert_yaxis()
+
+    # ✅ Lock the y-extent so empty first rows don't shift alignment.
+    # Using reversed limits also gives you the inverted y-axis.
+    ax.set_ylim(len(df) - 0.5, -0.5)
     ax.grid(axis="x", color="#eeeeee")
     ax.set_axisbelow(True)
     ax.set_xlim(-left_pad_data, xmax)
